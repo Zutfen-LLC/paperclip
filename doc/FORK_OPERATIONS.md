@@ -47,7 +47,7 @@ fabricated. Normal-run telemetry is compared against the terminal payload.
 
 Use a clean checkout of a full 40-character fork SHA, not a registry Paperclip
 package with manual source overlays. Tested build tools: Node `24.21.0`, pnpm
-`9.15.4` (the root `packageManager` pin), Rust/Cargo `1.98.1`, Python `3.14.7`.
+`9.15.4` (the root `packageManager` pin), Rust/Cargo `1.98.1`, Python `3.13.5`.
 The repository requires Node >=24.11.0. Linux native dependencies and the runner
 binary must be built on a compatible Linux x86-64 host. CT152 needs Node at
 runtime, not a compiler or Git; building on the controlled build host is supported.
