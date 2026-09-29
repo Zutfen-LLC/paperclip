@@ -659,10 +659,18 @@ describe("execute", () => {
     const result = await pending;
     const calls = fetchMock.mock.calls as Array<[RequestInfo | URL, RequestInit?]>;
 
-    expect(calls.some(([input]) => String(input).endsWith("/v1/runs/run-cancel-1/stop"))).toBe(true);
-    expect(result.errorCode).toBe("hermes_gateway_cancelled");
+    const stopCalls = calls.filter(([input]) => String(input).endsWith("/stop"));
+
+    expect(stopCalls).toHaveLength(1);
+    expect(String(stopCalls[0]?.[0])).toBe("http://127.0.0.1:8642/v1/runs/run-cancel-1/stop");
+    expect(result.exitCode).toBe(1);
+    expect(result.timedOut).toBe(false);
     expect(result.signal).toBe("SIGTERM");
+    expect(result.errorCode).toBe("hermes_gateway_cancelled");
+    expect(result.provider).toBe("hermes_gateway");
     expect(result.sessionParams?.hermesRunId).toBe("run-cancel-1");
+    expect(result.resultJson?.stop_requested).toBe(true);
+    expect(result.resultJson?.status).toBe("cancelled");
   });
 
   it("sends the stop request exactly once and only for the cancelled run's id", async () => {
@@ -683,9 +691,14 @@ describe("execute", () => {
     controller.abort();
     const stopCalls = (fetchMock.mock.calls as Array<[RequestInfo | URL]>).filter(([input]) => String(input).endsWith("/stop"));
 
+    expect(result.exitCode).toBe(1);
+    expect(result.timedOut).toBe(false);
+    expect(result.signal).toBe("SIGTERM");
     expect(result.errorCode).toBe("hermes_gateway_cancelled");
+    expect(result.provider).toBe("hermes_gateway");
+    expect(result.sessionParams?.hermesRunId).toBe("run-once-1");
     expect(stopCalls).toHaveLength(1);
-    expect(String(stopCalls[0]?.[0])).toContain("run-once-1");
+    expect(String(stopCalls[0]?.[0])).toBe("http://127.0.0.1:8642/v1/runs/run-once-1/stop");
   });
 
   it("does not stop a different Hermes run", async () => {
@@ -715,8 +728,15 @@ describe("execute", () => {
     const result = await pending;
     const stopCalls = (fetchMock.mock.calls as Array<[RequestInfo | URL]>).filter(([input]) => String(input).endsWith("/stop"));
 
+    expect(result.exitCode).toBe(1);
+    expect(result.timedOut).toBe(false);
+    expect(result.signal).toBe("SIGTERM");
     expect(result.errorCode).toBe("hermes_gateway_cancelled");
-    expect(stopCalls.map(([input]) => String(input))).toEqual([expect.stringContaining("run-sequence-2")]);
+    expect(result.provider).toBe("hermes_gateway");
+    expect(result.sessionParams?.hermesRunId).toBe("run-sequence-2");
+    const stopUrls = stopCalls.map(([input]) => String(input));
+    expect(stopUrls.every((url) => !url.includes("run-sequence-1"))).toBe(true);
+    expect(stopUrls).toEqual(["http://127.0.0.1:8642/v1/runs/run-sequence-2/stop"]);
   });
 
   it("treats an already-terminal Hermes run as done without treating cancellation as failure", async () => {
@@ -734,8 +754,16 @@ describe("execute", () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     controller.abort();
     const result = await pending;
+    const stopCalls = (fetchMock.mock.calls as Array<[RequestInfo | URL]>).filter(([input]) => String(input).endsWith("/stop"));
 
+    expect(result.exitCode).toBe(1);
+    expect(result.timedOut).toBe(false);
+    expect(result.signal).toBe("SIGTERM");
     expect(result.errorCode).toBe("hermes_gateway_cancelled");
+    expect(result.provider).toBe("hermes_gateway");
+    expect(result.sessionParams?.hermesRunId).toBe("run-terminal-1");
+    expect(stopCalls).toHaveLength(1);
+    expect(String(stopCalls[0]?.[0])).toBe("http://127.0.0.1:8642/v1/runs/run-terminal-1/stop");
     expect(result.resultJson?.status).toBe("completed");
   });
 
@@ -757,7 +785,13 @@ describe("execute", () => {
     controller.abort();
     const result = await pending;
 
+    expect(result.exitCode).toBe(1);
+    expect(result.timedOut).toBe(false);
+    expect(result.signal).toBe("SIGTERM");
     expect(result.errorCode).toBe("hermes_gateway_cancelled");
+    expect(result.provider).toBe("hermes_gateway");
+    expect(result.sessionParams?.hermesRunId).toBe("run-stop-failed");
+    expect(result.resultJson?.stop_requested).toBe(true);
     expect(result.resultJson?.stop_request_failed).toBe(true);
     expect(result.resultJson?.status).toBe("stop_requested");
   }, 15_000);
@@ -775,9 +809,17 @@ describe("execute", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
     const result = await execute(makeCtx({ apiBaseUrl: "http://127.0.0.1:8642", apiKey: "secret-key" }, { signal: controller.signal }));
+    const stopCalls = (fetchMock.mock.calls as Array<[RequestInfo | URL]>).filter(([input]) => String(input).endsWith("/stop"));
 
-    expect((fetchMock.mock.calls as Array<[RequestInfo | URL]>).some(([input]) => String(input).endsWith("/v1/runs/run-late-1/stop"))).toBe(true);
+    expect(stopCalls).toHaveLength(1);
+    expect(String(stopCalls[0]?.[0])).toBe("http://127.0.0.1:8642/v1/runs/run-late-1/stop");
+    expect(result.exitCode).toBe(1);
+    expect(result.timedOut).toBe(false);
+    expect(result.signal).toBe("SIGTERM");
     expect(result.errorCode).toBe("hermes_gateway_cancelled");
+    expect(result.provider).toBe("hermes_gateway");
+    expect(result.sessionParams?.hermesRunId).toBe("run-late-1");
+    expect(result.resultJson?.stop_requested).toBe(true);
   });
 
   it("calls stop on timeout", async () => {
