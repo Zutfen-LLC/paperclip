@@ -160,6 +160,7 @@ describe("execute", () => {
     expect(result.exitCode).toBe(0);
     expect(result.summary).toBe("done");
     expect(result.usage).toEqual({ inputTokens: 3, outputTokens: 2 });
+    expect(result.usageBasis).toBe("per_run");
 
     const calls = fetchMock.mock.calls as Array<[RequestInfo | URL, RequestInit?]>;
     const createCall = calls.find(([input]) => String(input).endsWith("/v1/runs"));
@@ -668,6 +669,7 @@ describe("execute", () => {
     expect(result.signal).toBe("SIGTERM");
     expect(result.errorCode).toBe("hermes_gateway_cancelled");
     expect(result.provider).toBe("hermes_gateway");
+    expect(result.usageBasis).toBe("per_run");
     expect(result.sessionParams?.hermesRunId).toBe("run-cancel-1");
     expect(result.resultJson?.stop_requested).toBe(true);
     expect(result.resultJson?.status).toBe("cancelled");
@@ -1091,6 +1093,15 @@ describe("mapFinalResultForTest", () => {
   it("omits usage when all usage counters are malformed", () => {
     const result = mapPayload({ usage: { input_tokens: "not-a-number", output_tokens: "invalid", cache_read_tokens: null } });
     expect(result).not.toHaveProperty("usage");
+  });
+
+  it("still maps the runtime model when usage is malformed", () => {
+    const result = mapPayload({
+      runtime: { model: "glm-5.3-flash" },
+      usage: { input_tokens: "not-a-number" },
+    });
+    expect(result.model).toBe("glm-5.3-flash");
+    expect(result.usage).toBeUndefined();
   });
 
   it("returns a null model when the payload has no model fields", () => {
