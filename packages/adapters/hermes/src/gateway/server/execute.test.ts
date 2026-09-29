@@ -1021,6 +1021,54 @@ describe("testEnvironment", () => {
 });
 
 describe("mapFinalResultForTest", () => {
+  const mapPayload = (payload: Record<string, unknown>) => mapFinalResultForTest({
+    terminal: {
+      runId: "run-telemetry",
+      status: "completed",
+      payload,
+    },
+    outputChunks: [],
+    sessionKey: null,
+    strategy: "issue",
+  });
+
+  it("prefers the runtime LLM model over the Hermes runner identity", () => {
+    const result = mapPayload({
+      status: "completed",
+      runtime: { provider: "zai", model: "glm-5.3-flash" },
+      model: "hermes-agent",
+    });
+    expect(result.model).toBe("glm-5.3-flash");
+  });
+
+  it("maps Hermes cache-read tokens into cached input tokens", () => {
+    const result = mapPayload({ usage: { input_tokens: 140218, output_tokens: 3340, cache_read_tokens: 113728 } });
+    expect(result.usage?.cachedInputTokens).toBe(113728);
+  });
+
+  it("leaves cost unpriced when usage is present but no cost is reported", () => {
+    const result = mapPayload({ usage: { input_tokens: 10, output_tokens: 5 } });
+    expect(result).not.toHaveProperty("costUsd");
+  });
+
+  it("omits usage when all usage counters are malformed", () => {
+    const result = mapPayload({ usage: { input_tokens: "not-a-number", output_tokens: "invalid", cache_read_tokens: null } });
+    expect(result).not.toHaveProperty("usage");
+  });
+
+  it("returns a null model when the payload has no model fields", () => {
+    expect(mapPayload({ status: "completed" }).model).toBeNull();
+  });
+
+  it("keeps telemetry isolated between consecutive terminal results", () => {
+    const first = mapPayload({ model: "model-one", usage: { input_tokens: 11, output_tokens: 2 } });
+    const second = mapPayload({ model: "model-two", usage: { input_tokens: 37, output_tokens: 8 } });
+    expect(first.model).toBe("model-one");
+    expect(first.usage).toEqual({ inputTokens: 11, outputTokens: 2 });
+    expect(second.model).toBe("model-two");
+    expect(second.usage).toEqual({ inputTokens: 37, outputTokens: 8 });
+  });
+
   it("maps failed statuses into adapter errors", () => {
     const result = mapFinalResultForTest({
       terminal: {
