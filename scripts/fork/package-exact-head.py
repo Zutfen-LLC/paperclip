@@ -76,6 +76,24 @@ def package(root, output):
         for p in generated:
             shutil.copytree(p, staging / p.relative_to(root), symlinks=True,
                             dirs_exist_ok=True, copy_function=copy_artifact)
+        # Bundled CLI imports retain bare names from bundled workspace packages.
+        # Expose the existing locked pnpm hoist aliases without fetching packages
+        # or replacing direct dependencies selected by the root workspace.
+        modules = staging / "node_modules"
+        virtual = modules / ".pnpm/node_modules"
+        if virtual.is_dir():
+            for entry in sorted(virtual.iterdir()):
+                if entry.name.startswith("."):
+                    continue
+                aliases = sorted(entry.iterdir()) if entry.name.startswith("@") and not entry.is_symlink() else [entry]
+                for alias in aliases:
+                    if not alias.is_symlink():
+                        continue
+                    destination = modules / alias.relative_to(virtual)
+                    if destination.exists() or destination.is_symlink():
+                        continue
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    destination.symlink_to(os.path.relpath(alias, destination.parent))
         # Relocate checkout-local absolute links; reject references outside this release.
         for directory, dirs, files in os.walk(staging, followlinks=False):
             for name in dirs + files:

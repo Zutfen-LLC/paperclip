@@ -67,7 +67,9 @@ python3 scripts/fork/package-exact-head.py \
 The packager refuses tracked source drift, stale server build stamps, missing
 artifacts, nonportable symlinks, and output overwrites. It includes `git archive`
 source plus the built workspace's dist directories/native runner and complete
-locked dependency layout, preserving relative workspace links. It adds
+locked dependency layout, preserving relative workspace links. It projects the
+existing pnpm hoist aliases for the bundled CLI's transitive bare imports; it does
+not download registry Paperclip packages. It adds
 `fork-release.json` (commit, tree, lockfile hash, tool versions) and a separate
 archive SHA-256. Do not use `build:npm` followed by installing registry
 `@paperclipai/server`: that can mix an exact-head CLI with a different server.

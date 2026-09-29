@@ -79,6 +79,19 @@ class ReleaseSafeguards(unittest.TestCase):
             self.assertEqual(manifest["commit"], self.sha)
         self.assertTrue(self.output.with_suffix(".gz.sha256").is_file())
 
+    def test_bundled_cli_can_resolve_hoisted_locked_dependencies(self):
+        virtual = self.root / "node_modules/.pnpm/node_modules"
+        target = self.root / "node_modules/.pnpm/fixture-dep@1/node_modules/fixture-dep"
+        target.mkdir(parents=True)
+        (target / "package.json").write_text('{"name":"fixture-dep","main":"index.js"}\n')
+        (target / "index.js").write_text('module.exports = 42;\n')
+        virtual.mkdir(parents=True)
+        (virtual / "fixture-dep").symlink_to("../fixture-dep@1/node_modules/fixture-dep")
+        pack.package(self.root, self.output)
+        with tarfile.open(self.output) as archive:
+            self.assertEqual(archive.getmember("release/node_modules/fixture-dep").linkname,
+                             ".pnpm/node_modules/fixture-dep")
+
     def test_cross_filesystem_staging_falls_back_to_copy(self):
         with mock.patch.object(pack.os, "link", side_effect=OSError(errno.EXDEV, "cross-device link")):
             pack.package(self.root, self.output)
