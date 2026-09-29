@@ -82,6 +82,71 @@ describe("parseSseFramesForTest", () => {
 });
 
 describe("execute", () => {
+  it.each(["stop", "status"])("bounds a hanging %s request by the combined stop grace budget", async (hanging) => {
+    const controller = new AbortController();
+    let stopping = false;
+    let blockedSignal: AbortSignal | null | undefined;
+    const blocked = (signal: AbortSignal | null | undefined) => {
+      blockedSignal = signal;
+      return new Promise<Response>((resolve, reject) => {
+        const safety = setTimeout(() => resolve(new Response('{"status":"running"}')), 300);
+        const abort = () => { clearTimeout(safety); reject(new DOMException("Aborted", "AbortError")); };
+        if (signal?.aborted) abort();
+        else signal?.addEventListener("abort", abort, { once: true });
+      });
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/v1/runs")) return new Response('{"run_id":"bounded-run"}');
+      if (url.endsWith("/events")) return new Promise<Response>(() => {});
+      if (url.endsWith("/stop")) {
+        stopping = true;
+        return hanging === "stop" ? blocked(init?.signal) : new Response('{"status":"stopping"}');
+      }
+      if (init?.method === "GET" && stopping) return blocked(init.signal);
+      return new Response('{"status":"running"}');
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const pending = execute(makeCtx({ apiBaseUrl: "http://127.0.0.1:8642", apiKey: "test-bounded-key", stopGraceMs: 25 }, { signal: controller.signal }));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const started = Date.now();
+    controller.abort();
+    const result = await pending;
+    expect(blockedSignal).toBeInstanceOf(AbortSignal);
+    expect(blockedSignal?.aborted).toBe(true);
+    expect(Date.now() - started).toBeLessThan(200);
+    expect(result.resultJson?.stop_confirmed).toBe(false);
+    expect(result.resultJson).not.toHaveProperty("executionCancellation");
+  });
+
+  it("stops the exact accepted run when cancellation occurs during blocked create", async () => {
+    const controller = new AbortController();
+    let releaseCreate!: (response: Response) => void;
+    let signalStarted!: () => void;
+    const started = new Promise<void>((resolve) => { signalStarted = resolve; });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/v1/runs")) {
+        signalStarted();
+        return new Promise<Response>((resolve) => { releaseCreate = resolve; });
+      }
+      if (url.endsWith("/events")) return new Promise<Response>(() => {});
+      if (url.endsWith("/stop")) return new Response('{"status":"stopping"}');
+      if (init?.method === "GET") return new Response('{"run_id":"accepted-late","status":"cancelled"}');
+      return new Response('{}');
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const pending = execute(makeCtx({ apiBaseUrl: "http://127.0.0.1:8642", apiKey: "test-create-key" }, { signal: controller.signal }));
+    await started;
+    controller.abort();
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/stop"))).toHaveLength(0);
+    releaseCreate(new Response('{"run_id":"accepted-late"}'));
+    const result = await pending;
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/stop")).map(([url]) => String(url))).toEqual(["http://127.0.0.1:8642/v1/runs/accepted-late/stop"]);
+    expect(result.resultJson?.stop_confirmed).toBe(true);
+    expect(result.resultJson?.executionCancellation).toMatchObject({ state: "acknowledged" });
+  });
+
   it("rejects remote plain HTTP unless the unsafe dev escape hatch is enabled", async () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({ run_id: "unexpected" }), { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
@@ -1131,5 +1196,41 @@ describe("mapFinalResultForTest", () => {
     expect(result.exitCode).toBe(1);
     expect(result.errorCode).toBe("hermes_gateway_run_failed");
     expect(result.errorMessage).toBe("boom");
+  });
+
+  it("prefers runtime provider, then usage provider, then Hermes gateway", () => {
+    expect(mapPayload({ runtime: { provider: "runtime" }, usage: { provider: "usage" } }).provider).toBe("runtime");
+    expect(mapPayload({ usage: { provider: "usage" } }).provider).toBe("usage");
+    expect(mapPayload({ provider: "top" }).provider).toBe("top");
+    expect(mapPayload({}).provider).toBe("hermes_gateway");
+  });
+
+  it("fails closed when cancellation readiness fails", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const ctx = makeCtx({ apiBaseUrl: "http://127.0.0.1:8642", apiKey: "secret-key" });
+    ctx.onCancellationReady = vi.fn(async () => { throw new Error("not ready"); });
+    const result = await execute(ctx);
+    expect(result.errorCode).toBe("hermes_gateway_cancellation_not_ready");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("accepts only exact-run final status when the response includes a run id", async () => {
+    const controller = new AbortController();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/v1/runs")) return new Response('{"run_id":"exact-run"}');
+      if (url.endsWith("/events")) return new Promise<Response>(() => {});
+      if (url.endsWith("/stop")) return new Response('{"status":"stopping"}');
+      if (init?.method === "GET") return new Response('{"run_id":"other-run","status":"cancelled"}');
+      return new Response('{}');
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const pending = execute(makeCtx({ apiBaseUrl: "http://127.0.0.1:8642", apiKey: "secret-key", stopGraceMs: 15 }, { signal: controller.signal }));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    controller.abort();
+    const result = await pending;
+    expect(result.resultJson?.stop_confirmed).toBe(false);
+    expect(result.resultJson).not.toHaveProperty("executionCancellation");
   });
 });

@@ -689,7 +689,7 @@ export function mapFinalResultForTest(input: {
     exitCode: mapped.exitCode,
     signal: mapped.signal,
     timedOut: false,
-    provider: "hermes_gateway",
+    provider: nonEmpty(asRecord(payload.runtime)?.provider) ?? nonEmpty(asRecord(payload.usage)?.provider) ?? nonEmpty(payload.provider) ?? "hermes_gateway",
     usageBasis: "per_run",
     model: extractModel(payload),
     ...(mapped.errorCode ? { errorCode: mapped.errorCode } : {}),
@@ -721,12 +721,14 @@ async function stopRun(input: {
   baseUrl: URL;
   headers: Record<string, string>;
   runId: string;
+  signal: AbortSignal;
   redactText?: TextRedactor;
 }): Promise<Record<string, unknown> | null> {
   try {
     const stopped = await fetchJson(apiUrl(input.baseUrl, `/v1/runs/${encodeURIComponent(input.runId)}/stop`), {
       method: "POST",
       headers: input.headers,
+      signal: input.signal,
     });
     await input.ctx.onLog("stdout", `[hermes-gateway] stop requested for run ${input.runId}\n`);
     return asRecord(stopped);
@@ -741,21 +743,28 @@ async function fetchFinalStatus(input: {
   headers: Record<string, string>;
   runId: string;
   deadlineMs: number;
+  signal: AbortSignal;
 }): Promise<Record<string, unknown> | null> {
   const deadline = Date.now() + input.deadlineMs;
-  while (Date.now() < deadline) {
+  while (Date.now() < deadline && !input.signal.aborted) {
     try {
       const status = await fetchJson(apiUrl(input.baseUrl, `/v1/runs/${encodeURIComponent(input.runId)}`), {
         method: "GET",
         headers: input.headers,
+        signal: input.signal,
       });
       const record = asRecord(status);
       const normalized = extractStatus(status);
-      if (normalized && TERMINAL_STATUSES.has(normalized)) return record;
+      const responseRunId = extractRunId(status);
+      if (normalized && TERMINAL_STATUSES.has(normalized) && (!responseRunId || responseRunId === input.runId)) return record;
     } catch {
       return null;
     }
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    try {
+      await delay(Math.min(500, Math.max(0, deadline - Date.now())), input.signal);
+    } catch {
+      return null;
+    }
   }
   return null;
 }
@@ -768,13 +777,18 @@ async function requestStopAndFinalStatus(input: {
   deadlineMs: number;
   redactText: TextRedactor;
 }): Promise<{ finalStatus: Record<string, unknown> | null; stopFailed: boolean }> {
-  const stopResponse = await stopRun(input);
+  const controller = new AbortController();
+  const deadline = Date.now() + input.deadlineMs;
+  const timer = setTimeout(() => controller.abort(), input.deadlineMs);
+  const stopResponse = await stopRun({ ...input, signal: controller.signal });
   const finalStatus = await fetchFinalStatus({
     baseUrl: input.baseUrl,
     headers: input.headers,
     runId: input.runId,
-    deadlineMs: input.deadlineMs,
+    deadlineMs: Math.max(0, deadline - Date.now()),
+    signal: controller.signal,
   });
+  clearTimeout(timer);
   return { finalStatus, stopFailed: stopResponse === null };
 }
 
@@ -892,8 +906,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     try {
       await ctx.onLog("stderr", `[hermes-gateway] cancellation readiness failed: ${redactErrorMessage(err, redactText)}\n`);
     } catch {
-      // Cancellation readiness is advisory; logging must not block run creation.
+      // Preserve readiness failure even if logging fails.
     }
+    return { exitCode: 1, signal: null, timedOut: false, errorCode: "hermes_gateway_cancellation_not_ready", errorMessage: redactErrorMessage(err, redactText) };
   }
 
   await ctx.onMeta?.({
