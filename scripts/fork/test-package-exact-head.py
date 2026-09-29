@@ -79,6 +79,23 @@ class ReleaseSafeguards(unittest.TestCase):
             self.assertEqual(manifest["commit"], self.sha)
         self.assertTrue(self.output.with_suffix(".gz.sha256").is_file())
 
+    def test_workspace_uses_canonical_publish_exports_at_runtime(self):
+        manifest = {"name": "fixture-server", "exports": {".": "./src/index.ts"},
+                    "publishConfig": {"exports": {".": "./dist/index.js"}}}
+        (self.root / "server/package.json").write_text(json.dumps(manifest))
+        self.git("add", "server/package.json")
+        self.git("commit", "--quiet", "-m", "fixture publish exports")
+        self.sha = self.git("rev-parse", "HEAD").strip()
+        (self.root / "server/dist/build-info.json").write_text(json.dumps({"commit": self.sha}))
+        pack.package(self.root, self.output)
+        with tarfile.open(self.output) as archive:
+            stream = archive.extractfile("release/server/package.json")
+            assert stream is not None
+            self.assertEqual(json.load(stream)["exports"], {".": "./dist/index.js"})
+            source = archive.extractfile("release/server/package.source.json")
+            assert source is not None
+            self.assertEqual(json.load(source)["exports"], {".": "./src/index.ts"})
+
     def test_bundled_cli_can_resolve_hoisted_locked_dependencies(self):
         virtual = self.root / "node_modules/.pnpm/node_modules"
         target = self.root / "node_modules/.pnpm/fixture-dep@1/node_modules/fixture-dep"

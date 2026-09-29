@@ -69,7 +69,10 @@ artifacts, nonportable symlinks, and output overwrites. It includes `git archive
 source plus the built workspace's dist directories/native runner and complete
 locked dependency layout, preserving relative workspace links. It projects the
 existing pnpm hoist aliases for the bundled CLI's transitive bare imports; it does
-not download registry Paperclip packages. It adds
+not download registry Paperclip packages. Workspace runtime manifests use their
+canonical `publishConfig` entrypoints; original manifests are retained alongside
+as `package.source.json`. This selects built JavaScript rather than requiring a
+TypeScript loader on CT152. It adds
 `fork-release.json` (commit, tree, lockfile hash, tool versions) and a separate
 archive SHA-256. Do not use `build:npm` followed by installing registry
 `@paperclipai/server`: that can mix an exact-head CLI with a different server.
@@ -104,7 +107,10 @@ For an unreviewed exact-head validation, use an offline copy of this existing PO
 state under a private validation home on the same CT152, with the same instance
 and entity IDs. Point only its database/log/storage/backup paths at that copy.
 Start the candidate through a temporary systemd user drop-in with an exact
-release entrypoint and validation `PAPERCLIP_HOME`. Keep the original unit,
+release entrypoint and validation `PAPERCLIP_HOME`. Also set `HOME` to that private
+validation home: otherwise the CLI doctor sees the original account's managed
+shim but no corresponding install manifest in the copied home. No managed install
+checks need to be disabled. Keep the original unit,
 original instance, and era install intact; never run both servers/databases
 simultaneously. This allows candidate migrations on the copied state while
 leaving the original DB untouched. Retain the validation state and E2E evidence

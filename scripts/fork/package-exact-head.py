@@ -76,6 +76,22 @@ def package(root, output):
         for p in generated:
             shutil.copytree(p, staging / p.relative_to(root), symlinks=True,
                             dirs_exist_ok=True, copy_function=copy_artifact)
+        # Apply each workspace's canonical npm publication entrypoints, while
+        # retaining the original source manifest for provenance inspection.
+        for directory in packages:
+            package_path = staging / directory.relative_to(root) / "package.json"
+            if not package_path.is_file():
+                continue
+            original = package_path.read_text()
+            data = json.loads(original)
+            publication = data.get("publishConfig", {})
+            fields = {key: publication[key] for key in ("exports", "main", "types", "bin")
+                      if key in publication}
+            if fields:
+                with package_path.with_name("package.source.json").open("x") as source_manifest:
+                    source_manifest.write(original)
+                data.update(fields)
+                package_path.write_text(json.dumps(data, indent=2) + "\n")
         # Bundled CLI imports retain bare names from bundled workspace packages.
         # Expose the existing locked pnpm hoist aliases without fetching packages
         # or replacing direct dependencies selected by the root workspace.
