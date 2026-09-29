@@ -621,7 +621,11 @@ function parseUsage(value: unknown): UsageSummary | undefined {
   const source = asRecord(record.usage) ?? record;
   const inputTokens = asNumber(source.input_tokens ?? source.inputTokens ?? source.input, 0);
   const outputTokens = asNumber(source.output_tokens ?? source.outputTokens ?? source.output, 0);
-  const cachedInputTokens = asNumber(source.cached_input_tokens ?? source.cachedInputTokens, 0);
+  const cachedInputTokens = asNumber(
+    source.cache_read_tokens ?? source.cacheReadTokens ?? source.cached_input_tokens ?? source.cachedInputTokens,
+    0,
+  );
+  // cache_write_tokens is deliberately unmapped: UsageSummary has no Paperclip field for it.
   if (inputTokens <= 0 && outputTokens <= 0 && cachedInputTokens <= 0) return undefined;
   return {
     inputTokens,
@@ -644,7 +648,9 @@ function extractSessionId(value: unknown): string | null {
 
 function extractModel(value: unknown): string | null {
   const record = asRecord(value);
-  return nonEmpty(record?.model) ?? nonEmpty(asRecord(record?.usage)?.model);
+  return nonEmpty(asRecord(record?.runtime)?.model)
+    ?? nonEmpty(asRecord(record?.usage)?.model)
+    ?? nonEmpty(record?.model);
 }
 
 function extractErrorMessage(value: unknown): string | null {
