@@ -690,6 +690,7 @@ export function mapFinalResultForTest(input: {
     signal: mapped.signal,
     timedOut: false,
     provider: "hermes_gateway",
+    usageBasis: "per_run",
     model: extractModel(payload),
     ...(mapped.errorCode ? { errorCode: mapped.errorCode } : {}),
     ...(errorMessage ? { errorMessage } : {}),
@@ -1005,6 +1006,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       signal: "SIGTERM",
       timedOut: false,
       provider: "hermes_gateway",
+      usageBasis: "per_run",
       errorCode: "hermes_gateway_cancelled",
       errorMessage: `Paperclip run cancelled; Hermes run ${runId} stop requested.`,
       ...(finalRecord ? { model: extractModel(finalRecord) } : {}),
@@ -1048,6 +1050,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       errorCode: "hermes_gateway_timeout",
       errorMessage: `Hermes gateway run timed out after ${timeoutSec}s.`,
       provider: "hermes_gateway",
+      usageBasis: "per_run",
       resultJson: {
         run_id: runId,
         status: extractStatus(finalStatus) ?? "timeout",
