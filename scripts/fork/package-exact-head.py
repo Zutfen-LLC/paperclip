@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Package a clean, fully built fork revision without registry Paperclip overlays."""
 import argparse
+import errno
 import hashlib
 import json
 import os
@@ -26,6 +27,16 @@ def verify(root):
         if not (root / relative).is_file():
             raise ValueError(f"Missing build/install artifact: {relative}")
     return revision
+
+
+def copy_artifact(source, destination):
+    try:
+        os.link(source, destination)
+    except OSError as error:
+        if error.errno != errno.EXDEV:
+            raise
+        shutil.copy2(source, destination)
+    return destination
 
 
 def package(root, output):
@@ -64,7 +75,7 @@ def package(root, output):
             source.extractall(staging, filter="data")
         for p in generated:
             shutil.copytree(p, staging / p.relative_to(root), symlinks=True,
-                            dirs_exist_ok=True, copy_function=os.link)
+                            dirs_exist_ok=True, copy_function=copy_artifact)
         # Relocate checkout-local absolute links; reject references outside this release.
         for directory, dirs, files in os.walk(staging, followlinks=False):
             for name in dirs + files:

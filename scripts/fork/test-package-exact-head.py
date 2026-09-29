@@ -1,4 +1,6 @@
 """Release safeguards; fixture artifacts are explicitly synthetic test inputs."""
+import errno
+from unittest import mock
 import importlib.util
 import json
 from pathlib import Path
@@ -76,6 +78,14 @@ class ReleaseSafeguards(unittest.TestCase):
             manifest = json.load(manifest_stream)
             self.assertEqual(manifest["commit"], self.sha)
         self.assertTrue(self.output.with_suffix(".gz.sha256").is_file())
+
+    def test_cross_filesystem_staging_falls_back_to_copy(self):
+        with mock.patch.object(pack.os, "link", side_effect=OSError(errno.EXDEV, "cross-device link")):
+            pack.package(self.root, self.output)
+        with tarfile.open(self.output) as archive:
+            stream = archive.extractfile("release/server/dist/index.js")
+            assert stream is not None
+            self.assertEqual(stream.read(), b"test fixture artifact\n")
 
     def test_checkout_absolute_link_becomes_release_relative(self):
         (self.root / "node_modules/owned").symlink_to(self.root / "server", target_is_directory=True)
