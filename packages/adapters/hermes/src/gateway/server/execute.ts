@@ -753,6 +753,24 @@ async function fetchFinalStatus(input: {
   return null;
 }
 
+async function requestStopAndFinalStatus(input: {
+  ctx: AdapterExecutionContext;
+  baseUrl: URL;
+  headers: Record<string, string>;
+  runId: string;
+  deadlineMs: number;
+  redactText: TextRedactor;
+}): Promise<{ finalStatus: Record<string, unknown> | null; stopFailed: boolean }> {
+  const stopResponse = await stopRun(input);
+  const finalStatus = await fetchFinalStatus({
+    baseUrl: input.baseUrl,
+    headers: input.headers,
+    runId: input.runId,
+    deadlineMs: input.deadlineMs,
+  });
+  return { finalStatus, stopFailed: stopResponse === null };
+}
+
 function redactErrorMessage(err: unknown, redactText: TextRedactor = sanitizeSensitiveText): string {
   if (err instanceof Error) return redactText(err.message);
   return redactText(String(err));
@@ -825,6 +843,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
   const timeoutSec = parseNonNegativeNumber(ctx.config.timeoutSec, DEFAULT_TIMEOUT_SEC);
   const timeoutMs = timeoutSec > 0 ? Math.ceil(timeoutSec * 1000) : 0;
+  const stopGraceMs = Math.floor(clamp(parseNonNegativeNumber(ctx.config.stopGraceMs, STOP_GRACE_MS), 0, 60_000));
   const reconnectMs = Math.floor(clamp(parseNonNegativeNumber(ctx.config.eventReconnectMs, DEFAULT_EVENT_RECONNECT_MS), 250, 30_000));
   const pollIntervalMs = Math.floor(clamp(parseNonNegativeNumber(ctx.config.pollIntervalMs, DEFAULT_POLL_INTERVAL_MS), 250, 10_000));
   const strategy = normalizeSessionKeyStrategy(ctx.config.sessionKeyStrategy);
@@ -859,6 +878,16 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   ]);
   const body = buildRunBody(ctx, sessionKey);
   const createRunUrl = apiUrl(baseUrl, "/v1/runs");
+
+  try {
+    await ctx.onCancellationReady?.();
+  } catch (err) {
+    try {
+      await ctx.onLog("stderr", `[hermes-gateway] cancellation readiness failed: ${redactErrorMessage(err, redactText)}\n`);
+    } catch {
+      // Cancellation readiness is advisory; logging must not block run creation.
+    }
+  }
 
   await ctx.onMeta?.({
     adapterType: ADAPTER_TYPE,
@@ -929,14 +958,74 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     if (timeoutMs <= 0) return;
     timeoutTimer = setTimeout(() => resolve("timeout"), timeoutMs);
   });
+  let removeCancellationListener: () => void = () => {};
+  const signal = ctx.signal;
+  const cancellationPromise = signal
+    ? new Promise<unknown>((resolve) => {
+      const onAbort = () => resolve(signal.reason ?? true);
+      if (signal.aborted) {
+        onAbort();
+      } else {
+        signal.addEventListener("abort", onAbort, { once: true });
+        removeCancellationListener = () => signal.removeEventListener("abort", onAbort);
+      }
+    })
+    : new Promise<never>(() => {});
 
-  const outcome = await Promise.race([state.terminalPromise, timeoutPromise]);
+  const outcome = await Promise.race([
+    state.terminalPromise,
+    timeoutPromise,
+    cancellationPromise.then(() => "cancelled" as const),
+  ]);
   if (timeoutTimer) clearTimeout(timeoutTimer);
+  removeCancellationListener();
   controller.abort();
 
+  if (outcome === "cancelled") {
+    const { finalStatus, stopFailed } = await requestStopAndFinalStatus({
+      ctx,
+      baseUrl,
+      headers: eventHeaders,
+      runId,
+      deadlineMs: stopGraceMs,
+      redactText,
+    });
+    const finalRecord = finalStatus ? asRecord(finalStatus) : null;
+    const usage = finalRecord ? parseUsage(finalRecord) : undefined;
+    const costUsd = finalRecord ? parseCostUsd(finalRecord) : null;
+    const result: AdapterExecutionResult = {
+      exitCode: 1,
+      signal: "SIGTERM",
+      timedOut: false,
+      provider: "hermes_gateway",
+      errorCode: "hermes_gateway_cancelled",
+      errorMessage: `Paperclip run cancelled; Hermes run ${runId} stop requested.`,
+      ...(finalRecord ? { model: extractModel(finalRecord) } : {}),
+      ...(usage ? { usage } : {}),
+      ...(costUsd !== null ? { costUsd } : {}),
+      sessionParams: { hermesRunId: runId, strategy },
+      sessionDisplayId: sessionKey ? redactText(sessionKey) : null,
+      resultJson: {
+        run_id: runId,
+        status: extractStatus(finalStatus) ?? "stop_requested",
+        last_event: state.lastEventName,
+        stop_requested: true,
+        ...(stopFailed ? { stop_request_failed: true } : {}),
+        final_status: redactForLog(finalStatus, [], 0, redactText),
+      },
+    };
+    return result;
+  }
+
   if (outcome === "timeout") {
-    await stopRun({ ctx, baseUrl, headers: eventHeaders, runId, redactText });
-    const finalStatus = await fetchFinalStatus({ baseUrl, headers: eventHeaders, runId, deadlineMs: STOP_GRACE_MS });
+    const { finalStatus } = await requestStopAndFinalStatus({
+      ctx,
+      baseUrl,
+      headers: eventHeaders,
+      runId,
+      deadlineMs: stopGraceMs,
+      redactText,
+    });
     return {
       exitCode: 1,
       signal: null,

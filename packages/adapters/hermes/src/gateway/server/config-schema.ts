@@ -1,5 +1,5 @@
 import type { AdapterConfigSchema } from "@paperclipai/adapter-utils";
-import { DEFAULT_EVENT_RECONNECT_MS, DEFAULT_TIMEOUT_SEC } from "../shared/constants.js";
+import { DEFAULT_EVENT_RECONNECT_MS, DEFAULT_TIMEOUT_SEC, STOP_GRACE_MS } from "../shared/constants.js";
 import { INSECURE_REMOTE_HTTP_ESCAPE_HATCH } from "./transport-security.js";
 
 export function getConfigSchema(): AdapterConfigSchema {
@@ -45,6 +45,13 @@ export function getConfigSchema(): AdapterConfigSchema {
         label: "Timeout seconds",
         type: "number",
         default: DEFAULT_TIMEOUT_SEC,
+      },
+      {
+        key: "stopGraceMs",
+        label: "Stop grace ms",
+        type: "number",
+        default: STOP_GRACE_MS,
+        hint: "Maximum time to wait for Hermes to report a terminal status after a stop request.",
       },
       {
         key: "eventReconnectMs",
