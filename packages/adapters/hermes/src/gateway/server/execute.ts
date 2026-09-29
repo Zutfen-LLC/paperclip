@@ -997,6 +997,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       redactText,
     });
     const finalRecord = finalStatus ? asRecord(finalStatus) : null;
+    const stopAcked = !stopFailed && finalStatus !== null;
     const usage = finalRecord ? parseUsage(finalRecord) : undefined;
     const costUsd = finalRecord ? parseCostUsd(finalRecord) : null;
     const result: AdapterExecutionResult = {
@@ -1016,7 +1017,15 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         status: extractStatus(finalStatus) ?? "stop_requested",
         last_event: state.lastEventName,
         stop_requested: true,
+        stop_confirmed: stopAcked,
         ...(stopFailed ? { stop_request_failed: true } : {}),
+        ...(stopAcked ? {
+          executionCancellation: {
+            state: "acknowledged",
+            acknowledgedAt: new Date().toISOString(),
+            proof: "gateway_terminal_status",
+          },
+        } : {}),
         final_status: redactForLog(finalStatus, [], 0, redactText),
       },
     };
