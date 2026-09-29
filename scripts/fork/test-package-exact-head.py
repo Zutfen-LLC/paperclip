@@ -77,6 +77,12 @@ class ReleaseSafeguards(unittest.TestCase):
             self.assertEqual(manifest["commit"], self.sha)
         self.assertTrue(self.output.with_suffix(".gz.sha256").is_file())
 
+    def test_checkout_absolute_link_becomes_release_relative(self):
+        (self.root / "node_modules/owned").symlink_to(self.root / "server", target_is_directory=True)
+        pack.package(self.root, self.output)
+        with tarfile.open(self.output) as archive:
+            self.assertEqual(archive.getmember("release/node_modules/owned").linkname, "../server")
+
     def test_nonportable_link_is_rejected(self):
         (self.root / "node_modules/escape").symlink_to("/etc/passwd")
         with self.assertRaisesRegex(ValueError, "Nonportable"):

@@ -65,13 +65,21 @@ def package(root, output):
         for p in generated:
             shutil.copytree(p, staging / p.relative_to(root), symlinks=True,
                             dirs_exist_ok=True, copy_function=os.link)
-        # Reject host-absolute links or workspace links that would escape this release.
+        # Relocate checkout-local absolute links; reject references outside this release.
         for directory, dirs, files in os.walk(staging, followlinks=False):
             for name in dirs + files:
                 p = Path(directory) / name
                 if p.is_symlink():
                     target = os.readlink(p)
-                    if os.path.isabs(target) or not p.resolve().is_relative_to(staging.resolve()):
+                    if os.path.isabs(target):
+                        original_target = Path(target).resolve()
+                        if not original_target.is_relative_to(root):
+                            raise ValueError(f"Nonportable symlink: {p.relative_to(staging)}")
+                        release_target = staging / original_target.relative_to(root)
+                        p.unlink()
+                        p.symlink_to(os.path.relpath(release_target, p.parent),
+                                     target_is_directory=release_target.is_dir())
+                    if not p.resolve().is_relative_to(staging.resolve()):
                         raise ValueError(f"Nonportable symlink: {p.relative_to(staging)}")
         (staging / "fork-release.json").write_text(json.dumps(manifest, indent=2) + "\n")
         with tarfile.open(output, "w:gz", compresslevel=1) as release:
