@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import type { JSX } from "react";
 import { usePluginData } from "@paperclipai/plugin-sdk/ui";
 import { AUTHORITY_NOTICE, STALE_AFTER_MS } from "../constants.js";
 

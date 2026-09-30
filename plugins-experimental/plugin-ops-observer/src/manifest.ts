@@ -46,9 +46,10 @@ const manifest: PaperclipPluginManifestV1 = {
       },
       adapterToken: {
         type: "string",
+        format: "secret-ref",
         title: "Read-only adapter bearer token",
         description:
-          "Token that authorizes ONLY the adapter's single GET /snapshot route.",
+          "Token that authorizes ONLY the adapter's single GET /snapshot route. Select a company secret; raw values are not protected as secrets here.",
       },
     },
     required: ["adapterBaseUrl", "adapterToken"],

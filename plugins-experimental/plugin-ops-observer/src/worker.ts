@@ -36,6 +36,18 @@ function requireString(value: unknown, name: string): string {
   return value.trim();
 }
 
+function normalizedBaseUrl(value: unknown): string {
+  const raw = requireString(value, "adapterBaseUrl");
+  try {
+    const parsed = new URL(raw);
+    if (parsed.username || parsed.password || parsed.search || parsed.hash) throw new Error();
+    parsed.pathname = parsed.pathname.replace(/\/+$/, "");
+    return parsed.toString().replace(/\/$/, "");
+  } catch {
+    throw new Error("Invalid adapterBaseUrl");
+  }
+}
+
 function isFresh(entry: CachedEntry): boolean {
   return Date.now() - entry.fetchedAt < CACHE_TTL_MS;
 }
@@ -62,15 +74,15 @@ async function fetchSnapshot(baseUrl: string, token: string): Promise<unknown> {
 }
 
 const plugin = definePlugin({
-  setup(ctx) {
+  async setup(ctx) {
     // no events, no jobs, no webhooks, no actions: observation is pull-only
     ctx.data.register(DATA_KEYS.snapshot, async (params) => {
-      const config = await ctx.config.get(
-        typeof params?.companyId === "string" ? params.companyId : undefined,
-      );
-      const baseUrl = requireString(config.adapterBaseUrl, "adapterBaseUrl");
+      const companyId = typeof params?.companyId === "string" ? params.companyId.trim() : "";
+      if (!companyId) throw new Error("Company scope is required");
+      const config = await ctx.config.get(companyId);
+      const baseUrl = normalizedBaseUrl(config.adapterBaseUrl);
       const token = requireString(config.adapterToken, "adapterToken");
-      const cacheKey = baseUrl;
+      const cacheKey = JSON.stringify([companyId, baseUrl]);
 
       const cached = cache.get(cacheKey);
       if (cached && isFresh(cached)) {
@@ -82,14 +94,19 @@ const plugin = definePlugin({
         return envelope;
       }
 
-      const snapshot = await fetchSnapshot(baseUrl, token);
-      const entry: CachedEntry = { fetchedAt: Date.now(), snapshot };
-      cache.set(cacheKey, entry);
-      const envelope: SnapshotEnvelope = {
-        fetchedAt: entry.fetchedAt,
-        snapshot: entry.snapshot,
-      };
-      return envelope;
+      try {
+        const snapshot = await fetchSnapshot(baseUrl, token);
+        const entry: CachedEntry = { fetchedAt: Date.now(), snapshot };
+        cache.set(cacheKey, entry);
+        const envelope: SnapshotEnvelope = {
+          fetchedAt: entry.fetchedAt,
+          snapshot: entry.snapshot,
+        };
+        return envelope;
+      } catch {
+        // Never forward fetch/runtime exception text: it can contain request headers.
+        throw new Error("Ops snapshot request failed (fail closed)");
+      }
     });
   },
 });

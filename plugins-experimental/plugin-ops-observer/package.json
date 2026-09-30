@@ -7,7 +7,7 @@
   "files": ["dist", "README.md"],
   "scripts": {
     "build": "node ./esbuild.config.mjs",
-    "test": "node --test test/",
+    "test": "node --test test/*.test.mjs",
     "typecheck": "tsc --noEmit"
   },
   "paperclipPlugin": {

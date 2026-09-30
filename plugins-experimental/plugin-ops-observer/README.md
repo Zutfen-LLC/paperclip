@@ -30,7 +30,8 @@ credential. Ops Supervisor's core API has no auth model that can express
 read-only scope, which is why the adapter exists at all: it IS the
 mechanically-proven read-only scope.
 
-## What it shows
+`adapterToken` uses the host's `format: "secret-ref"` instance-config schema support. Configure it by selecting a company secret (or submitting a valid secret-ref binding), rather than pasting a raw token. The plugin worker receives whatever `ctx.config.get(companyId)` resolves at runtime; this plugin does not independently resolve secret references. The inspected plugin-config route recognizes `secret-ref` fields and synchronizes bindings when saving config. End-to-end host resolution and API/UI redaction were not verified as part of this local plugin change.
+
 
 `ops_work_snapshot_v1` items: project/repo, issue number/title/state,
 Ops lifecycle + execution state, run id, review state, PR number/head SHA,
