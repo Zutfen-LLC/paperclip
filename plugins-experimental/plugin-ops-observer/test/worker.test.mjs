@@ -25,10 +25,13 @@ const plugin = (workerModule.default ?? workerModule).definition;
 
 // Drive the plugin through the same contract the host uses: setup(ctx).
 // Capture the ctx we hand it so tests can invoke registered data handlers.
-function makeCtx(config) {
+function makeCtx(config, companyId = "company-default") {
   const dataHandlers = new Map();
   const ctx = {
-    config: { get: async () => config },
+    config: { get: async (requestedCompanyId) => {
+      if (companyId !== "company-default") assert.equal(requestedCompanyId, companyId);
+      return typeof config === "function" ? config(requestedCompanyId) : config;
+    } },
     data: { register: (k, h) => dataHandlers.set(k, h) },
     events: { on: () => {} },
     jobs: { register: () => {} },
@@ -100,7 +103,7 @@ function startFakeAdapter(opts = {}) {
       return;
     }
     res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify(SNAPSHOT));
+    res.end(JSON.stringify(opts.payload ?? SNAPSHOT));
   });
   return new Promise((resolve) => {
     server.listen(0, "127.0.0.1", () => resolve({ server, seen, port: server.address().port }));
@@ -158,6 +161,65 @@ test("read-through cache: second call within TTL does not re-fetch", async () =>
   } finally {
     fake.server.close();
   }
+});
+
+test("cache isolates companies sharing a URL and reuses within one company", async () => {
+  const fake = await startFakeAdapter();
+  try {
+    const handlers = new Map();
+    for (const companyId of ["company-a", "company-b"]) {
+      const { dataHandlers } = makeCtx({ adapterBaseUrl: `http://127.0.0.1:${fake.port}`, adapterToken: "tok" }, companyId);
+      handlers.set(companyId, dataHandlers.get("ops-snapshot"));
+    }
+    await handlers.get("company-a")({ companyId: "company-a" });
+    const sameCompany = await handlers.get("company-a")({ companyId: "company-a" });
+    const otherCompany = await handlers.get("company-b")({ companyId: "company-b" });
+    assert.equal(sameCompany.cached, true);
+    assert.notEqual(otherCompany.cached, true);
+    assert.equal(fake.seen.length, 2);
+  } finally { fake.server.close(); }
+});
+
+test("same company with different normalized URLs has independent cache entries", async () => {
+  const a = await startFakeAdapter({ payload: { ...SNAPSHOT, marker: "response-a" } });
+  const b = await startFakeAdapter({ payload: { ...SNAPSHOT, marker: "response-b" } });
+  try {
+    const { dataHandlers: aHandlers } = makeCtx({ adapterBaseUrl: `http://127.0.0.1:${a.port}/`, adapterToken: "tok" }, "company-url");
+    const { dataHandlers: bHandlers } = makeCtx({ adapterBaseUrl: `http://127.0.0.1:${b.port}`, adapterToken: "tok" }, "company-url");
+    const one = await aHandlers.get("ops-snapshot")({ companyId: "company-url" });
+    const two = await bHandlers.get("ops-snapshot")({ companyId: "company-url" });
+    assert.equal(one.snapshot.marker, "response-a");
+    assert.equal(two.snapshot.marker, "response-b");
+    assert.notEqual(two.cached, true);
+    assert.equal(a.seen.length, 1);
+    assert.equal(b.seen.length, 1);
+  } finally { a.server.close(); b.server.close(); }
+});
+
+test("missing company scope fails before config lookup or fetch", async () => {
+  const fake = await startFakeAdapter();
+  let configReads = 0;
+  try {
+    const handlers = new Map();
+    const ctx = { config: { get: async () => { configReads++; return { adapterBaseUrl: `http://127.0.0.1:${fake.port}`, adapterToken: "tok" }; } }, data: { register: (k,h) => handlers.set(k,h) }, events:{on(){}}, jobs:{register(){}}, launchers:{register(){}}, logger:{info(){},warn(){},error(){}} };
+    plugin.setup(ctx);
+    await assert.rejects(() => handlers.get("ops-snapshot")({}), /company/i);
+    assert.equal(configReads, 0);
+    assert.equal(fake.seen.length, 0);
+  } finally { fake.server.close(); }
+});
+
+test("token is absent from cache identifiers, returned data, and malicious fetch errors", async () => {
+  const token = "unique-secret-token-do-not-leak";
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => { throw new Error(`request failed Authorization: Bearer ${token}`); };
+    const { dataHandlers } = makeCtx({ adapterBaseUrl: "http://adapter.invalid", adapterToken: token }, "company-redaction");
+    await assert.rejects(() => dataHandlers.get("ops-snapshot")({ companyId: "company-redaction" }), (error) => {
+      assert.ok(!String(error).includes(token));
+      return true;
+    });
+  } finally { globalThis.fetch = originalFetch; }
 });
 
 test("adapter 502 fails closed with explicit error", async () => {
