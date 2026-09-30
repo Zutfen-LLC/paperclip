@@ -1,4 +1,5 @@
 import { definePlugin, runWorker } from "@paperclipai/plugin-sdk";
+import type { EnvSecretRefBinding } from "@paperclipai/plugin-sdk";
 import { CACHE_TTL_MS, DATA_KEYS } from "./constants.js";
 
 /**
@@ -27,7 +28,7 @@ interface CachedEntry {
   snapshot: unknown;
 }
 
-const cache = new Map<string, CachedEntry>();
+export const cache = new Map<string, CachedEntry>();
 
 function requireString(value: unknown, name: string): string {
   if (typeof value !== "string" || value.trim() === "") {
@@ -48,6 +49,11 @@ function normalizedBaseUrl(value: unknown): string {
   }
 }
 
+function isSecretRefBinding(value: unknown): value is EnvSecretRefBinding {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    && (value as { type?: unknown }).type === "secret_ref"
+    && typeof (value as { secretId?: unknown }).secretId === "string";
+}
 function isFresh(entry: CachedEntry): boolean {
   return Date.now() - entry.fetchedAt < CACHE_TTL_MS;
 }
@@ -79,9 +85,22 @@ const plugin = definePlugin({
     ctx.data.register(DATA_KEYS.snapshot, async (params) => {
       const companyId = typeof params?.companyId === "string" ? params.companyId.trim() : "";
       if (!companyId) throw new Error("Company scope is required");
-      const config = await ctx.config.get(companyId);
+      let config: Record<string, unknown>;
+      try {
+        config = await ctx.config.get(companyId);
+      } catch {
+        throw new Error("Ops snapshot configuration unavailable (fail closed)");
+      }
       const baseUrl = normalizedBaseUrl(config.adapterBaseUrl);
-      const token = requireString(config.adapterToken, "adapterToken");
+      const tokenRef = config.adapterToken;
+      let token: string;
+      try {
+        token = isSecretRefBinding(tokenRef)
+          ? await ctx.secrets.resolve(tokenRef, { companyId, configPath: "adapterToken" })
+          : requireString(tokenRef, "adapterToken");
+      } catch {
+        throw new Error("Ops snapshot credential unavailable (fail closed)");
+      }
       const cacheKey = JSON.stringify([companyId, baseUrl]);
 
       const cached = cache.get(cacheKey);

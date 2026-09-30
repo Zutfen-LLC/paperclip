@@ -29,6 +29,7 @@ const manifest: PaperclipPluginManifestV1 = {
   capabilities: [
     "http.outbound",
     "ui.page.register",
+    "secrets.read-ref",
   ],
   entrypoints: {
     worker: "./dist/worker.js",
