@@ -18,8 +18,9 @@ Ops Supervisor / GitHub authority        [sole authority planes]
 ```
 
 The plugin holds:
-- capability `http.outbound` + `ui.page.register` ONLY (no data-write,
-  issue, agent, or state capabilities — enforced by the host);
+- capabilities `http.outbound`, `ui.page.register`, and `secrets.read-ref`
+  (the latter resolves only company-bound config secret references; no
+  data-write, issue, agent, or state capabilities — enforced by the host);
 - a bearer token that authorizes exactly ONE route: `GET /snapshot` on the
   dedicated ops-readonly-adapter. The adapter itself is GET-only
   (every other method 405), exposes no Ops write route, and fails closed
@@ -45,9 +46,20 @@ buttons because the worker registers no action handlers at all.
 
 ## Cache
 
-Read-through, 30s TTL, in-worker memory only. Stale (>60s) is visibly
-marked. Refresh re-reads; it never writes anywhere. No Ops state is
-persisted inside Paperclip.
+Read-through, 30s TTL, in-worker memory only. Each cache key is the explicit
+pair of required company ID and normalized adapter base URL, never the token.
+Missing company scope fails before configuration or cache access. Companies
+sharing an adapter URL cannot reuse one another's cached payloads. Stale
+(>60s) is visibly marked. A failed refresh reports an error rather than
+returning an expired snapshot. Refresh re-reads; it never writes anywhere.
+No Ops state is persisted inside Paperclip.
+
+Secret-ref designation does not automatically encrypt a raw string placed in
+plugin config. The config API persists and returns the stored `configJson` to
+authorized board callers; legacy raw tokens are therefore plaintext config.
+A real secret-ref config stores only the reference object, and explicit scoped
+resolution accesses the company secret. This correction does not migrate the
+live raw-token config or claim an end-to-end UI/API redaction audit.
 
 ## Layout
 
