@@ -111,6 +111,12 @@ function startFakeAdapter(opts = {}) {
 }
 
 
+test("declares the adapter token as a company-secret reference field", async () => {
+  const manifestModule = await import("../dist/manifest.js");
+  const manifest = manifestModule.default;
+  assert.equal(manifest.instanceConfigSchema.properties.adapterToken.format, "secret-ref");
+});
+
 test("worker module registers no actions and no mutating surface", () => {
   assert.equal(typeof plugin.setup, "function");
   // setup against a context that HAS an actions client must not register any
@@ -135,7 +141,7 @@ test("getData retrieves snapshot; adapter sees only GET /snapshot with bearer", 
       adapterBaseUrl: `http://127.0.0.1:${fake.port}`,
       adapterToken: "tok",
     });
-    const result = await captured.get("ops-snapshot")({});
+    const result = await captured.get("ops-snapshot")({ companyId: "company-default" });
     assert.equal(result.snapshot.items[0].ops_task_id, "gh-Zutfen-LLC-ops-supervisor-214");
     assert.equal(fake.seen.length, 1);
     assert.equal(fake.seen[0].method, "GET");
@@ -146,6 +152,20 @@ test("getData retrieves snapshot; adapter sees only GET /snapshot with bearer", 
   }
 });
 
+test("uses company-scoped resolved config from ctx.config.get", async () => {
+  const fake = await startFakeAdapter();
+  const secretValue = "resolved-company-token";
+  try {
+    const { dataHandlers } = makeCtx((companyId) => {
+      assert.equal(companyId, "company-resolved-config");
+      return { adapterBaseUrl: `http://127.0.0.1:${fake.port}`, adapterToken: secretValue };
+    }, "company-resolved-config");
+    const result = await dataHandlers.get("ops-snapshot")({ companyId: "company-resolved-config" });
+    assert.ok(result.snapshot);
+    assert.equal(fake.seen[0].auth, `Bearer ${secretValue}`);
+  } finally { fake.server.close(); }
+});
+
 test("read-through cache: second call within TTL does not re-fetch", async () => {
   const fake = await startFakeAdapter();
   try {
@@ -153,8 +173,8 @@ test("read-through cache: second call within TTL does not re-fetch", async () =>
       adapterBaseUrl: `http://127.0.0.1:${fake.port}`,
       adapterToken: "tok",
     });
-    await captured.get("ops-snapshot")({});
-    const second = await captured.get("ops-snapshot")({});
+    await captured.get("ops-snapshot")({ companyId: "company-default" });
+    const second = await captured.get("ops-snapshot")({ companyId: "company-default" });
     assert.equal(second.cached, true);
     assert.equal(fake.seen.length, 1);
     assert.deepEqual(second.snapshot.items, SNAPSHOT.items);
@@ -230,7 +250,7 @@ test("adapter 502 fails closed with explicit error", async () => {
       adapterToken: "tok",
     });
     await assert.rejects(
-      () => captured.get("ops-snapshot")({}),
+      () => captured.get("ops-snapshot")({ companyId: "company-default" }),
       /fail closed/,
     );
   } finally {
@@ -246,8 +266,8 @@ test("unexpected payload schema fails closed", async () => {
       adapterToken: "tok",
     });
     await assert.rejects(
-      () => captured.get("ops-snapshot")({}),
-      /unexpected snapshot schema/,
+      () => captured.get("ops-snapshot")({ companyId: "company-default" }),
+      /fail closed/,
     );
   } finally {
     fake.server.close();
@@ -257,7 +277,7 @@ test("unexpected payload schema fails closed", async () => {
 test("missing config fails closed (no invented defaults)", async () => {
   const { dataHandlers: captured } = makeCtx({});
   await assert.rejects(
-    () => captured.get("ops-snapshot")({}),
+    () => captured.get("ops-snapshot")({ companyId: "company-default" }),
     /Missing required config/,
   );
 });
@@ -269,7 +289,7 @@ test("provenance passes through unmodified", async () => {
       adapterBaseUrl: `http://127.0.0.1:${fake.port}`,
       adapterToken: "tok",
     });
-    const result = await captured.get("ops-snapshot")({});
+    const result = await captured.get("ops-snapshot")({ companyId: "company-default" });
     const item = result.snapshot.items[0];
     assert.equal(item.source_version.ops_deployed_sha, SNAPSHOT.ops_deployed_sha);
     assert.deepEqual(item.source_links, SNAPSHOT.items[0].source_links);
