@@ -42,7 +42,7 @@ const manifest: PaperclipPluginManifestV1 = {
         type: "string",
         title: "Read-only adapter base URL",
         description:
-          "Base URL of the dedicated ops-readonly-adapter (GET /snapshot only).",
+          "Pinned destination: http://127.0.0.1:18487 (optional single root slash). No other origins, paths, or redirects are authorized; GET /snapshot only.",
         default: "http://127.0.0.1:18487",
       },
       adapterToken: {

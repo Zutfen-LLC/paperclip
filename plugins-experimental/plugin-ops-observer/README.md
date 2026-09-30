@@ -44,10 +44,39 @@ source endpoints, fetch time). Missing values render as explicit
 No actions are registered: the UI has no retry/approve/stop/merge/assign
 buttons because the worker registers no action handlers at all.
 
+## Pinned destination trust boundary
+
+The worker pins the approved origin to `http://127.0.0.1:18487`, the dedicated
+local ops-readonly-adapter endpoint from the reviewed manifest deployment default.
+`adapterBaseUrl` may be exactly
+that literal or `http://127.0.0.1:18487/`; both normalize to the pinned origin.
+This is a code-owned policy, not an arbitrary company-configured URL allowlist.
+Changing the deployed topology requires a separately reviewed code change.
+
+Validation runs after mandatory company-scoped config lookup but BEFORE reading
+`adapterToken`, resolving a secret reference, consulting the cache, or fetching.
+Every other spelling fails closed: other schemes/ports, DNS names (including
+`localhost`), other IPv4 addresses, IPv6, alternate IPv4 loopback notation,
+userinfo, query/fragment delimiters (even empty), non-root paths, extra slashes,
+dot segments, backslashes, encoded hosts/paths, whitespace/control characters,
+and parser-normalized aliases. Literal admission precedes URL parsing; parsing
+then verifies the exact origin and root path. No hostname lookup/DNS alias is
+needed for the authorized numeric address.
+
+The only request is `GET http://127.0.0.1:18487/snapshot` with the adapter bearer.
+Native fetch uses `redirect: "error"`: ALL redirects, including same-origin ones,
+fail closed without a second request. Error diagnostics do not include rejected
+URLs, token values, or underlying fetch/secret exceptions. The boundary assumes
+the operator controls the process/tunnel listening at this exact loopback port;
+origin pinning is not server authentication against a compromised local host.
+HTTP is intentional for this dedicated local tunnel, not permission to transmit
+the credential to other HTTP services. Legacy raw tokens are still supported
+with the same destination gate and the plaintext-config caveat below.
+
 ## Cache
 
 Read-through, 30s TTL, in-worker memory only. Each cache key is the explicit
-pair of required company ID and normalized adapter base URL, never the token.
+pair of required company ID and normalized approved adapter origin, never the token.
 Missing company scope fails before configuration or cache access. Companies
 sharing an adapter URL cannot reuse one another's cached payloads. Stale
 (>60s) is visibly marked. A failed refresh reports an error rather than
@@ -69,6 +98,16 @@ changes. Install from a local path (operator action):
 
 ## Tests
 
-`node --test test/worker.test.mjs` — proves GET-only fetch, cache
-behavior, fail-closed on adapter failure / bad schema / missing config,
-no registered actions, and provenance pass-through.
+From this package directory: `npm run build`, `npm test`, `npm run typecheck`.
+Tests import the built worker artifact. `test/destination-policy.test.mjs`
+checks the adversarial URL matrix with both raw and secret-ref credentials,
+each with cold and pre-seeded caches. It asserts zero token-property reads,
+secret resolutions, cache reads, and fetch calls on rejection, plus no token
+in envelopes/errors/logs/cache. Real HTTP redirect fixtures cover 301/302/303/
+307/308 and prove zero redirect-target requests. Test-only transports verify
+the production pinned URL before mapping it to disposable ephemeral listeners;
+the worker policy itself is never widened for testing.
+
+`test/worker.test.mjs` retains GET-only, company-isolated cache, TTL refresh,
+failed-refresh fail-closed, company-scoped secret resolution, token hygiene,
+no-actions, and provenance regressions. Stale-display behavior is unchanged.

@@ -112,7 +112,25 @@ function startFakeAdapter(opts = {}) {
     res.end(JSON.stringify(opts.payload ?? SNAPSHOT));
   });
   return new Promise((resolve) => {
-    server.listen(0, "127.0.0.1", () => resolve({ server, seen, port: server.address().port }));
+    server.listen(0, "127.0.0.1", () => {
+      workerModule.cache.clear();
+      const originalFetch = globalThis.fetch;
+      // Preserve production URL/method/redirect checks; only the test transport
+      // maps the pinned endpoint to this disposable HTTP listener.
+      globalThis.fetch = (url, options) => {
+        assert.equal(url, "http://127.0.0.1:18487/snapshot");
+        assert.equal(options.method, "GET");
+        assert.equal(options.redirect, "error");
+        return originalFetch(`http://127.0.0.1:${server.address().port}/snapshot`, options);
+      };
+      const originalClose = server.close.bind(server);
+      server.close = (...args) => {
+        globalThis.fetch = originalFetch;
+        server.closeAllConnections();
+        return originalClose(...args);
+      };
+      resolve({ server, seen, port: 18487 });
+    });
   });
 }
 
@@ -242,20 +260,22 @@ test("cache isolates companies sharing a URL and reuses within one company", asy
   } finally { fake.server.close(); }
 });
 
-test("same company with different normalized URLs has independent cache entries", async () => {
+test("same company normalizes approved root slash; changed destination cannot reuse cache", async () => {
   const a = await startFakeAdapter({ payload: { ...SNAPSHOT, marker: "response-a" } });
-  const b = await startFakeAdapter({ payload: { ...SNAPSHOT, marker: "response-b" } });
   try {
-    const { dataHandlers: aHandlers } = makeCtx({ adapterBaseUrl: `http://127.0.0.1:${a.port}/`, adapterToken: "tok" }, "company-url");
-    const { dataHandlers: bHandlers } = makeCtx({ adapterBaseUrl: `http://127.0.0.1:${b.port}`, adapterToken: "tok" }, "company-url");
+    const { dataHandlers: aHandlers } = makeCtx({ adapterBaseUrl: "http://127.0.0.1:18487/", adapterToken: "tok" }, "company-url");
+    const { dataHandlers: normalizedHandlers } = makeCtx({ adapterBaseUrl: "http://127.0.0.1:18487", adapterToken: "tok" }, "company-url");
+    const resolutions = [];
+    const { dataHandlers: bHandlers } = makeCtx({ adapterBaseUrl: "http://127.0.0.1:18488", adapterToken: { type: "secret_ref", secretId: "unused" } }, "company-url", { resolutions });
     const one = await aHandlers.get("ops-snapshot")({ companyId: "company-url" });
-    const two = await bHandlers.get("ops-snapshot")({ companyId: "company-url" });
+    const two = await normalizedHandlers.get("ops-snapshot")({ companyId: "company-url" });
     assert.equal(one.snapshot.marker, "response-a");
-    assert.equal(two.snapshot.marker, "response-b");
-    assert.notEqual(two.cached, true);
+    assert.equal(two.cached, true);
+    await assert.rejects(() => bHandlers.get("ops-snapshot")({ companyId: "company-url" }), /destination not approved/);
+    assert.deepEqual(resolutions, []);
     assert.equal(a.seen.length, 1);
-    assert.equal(b.seen.length, 1);
-  } finally { a.server.close(); b.server.close(); }
+    assert.deepEqual([...workerModule.cache.keys()], [JSON.stringify(["company-url", "http://127.0.0.1:18487"])]);
+  } finally { a.server.close(); }
 });
 
 test("missing company scope fails before config lookup or fetch", async () => {

@@ -37,16 +37,26 @@ function requireString(value: unknown, name: string): string {
   return value.trim();
 }
 
+// Pinned to the dedicated CT152 loopback tunnel; see manifest deployment default.
+// This is not a generic loopback allowlist and is not company-configurable authority.
+const APPROVED_ADAPTER_ORIGIN = "http://127.0.0.1:18487";
+
 function normalizedBaseUrl(value: unknown): string {
-  const raw = requireString(value, "adapterBaseUrl");
-  try {
-    const parsed = new URL(raw);
-    if (parsed.username || parsed.password || parsed.search || parsed.hash) throw new Error();
-    parsed.pathname = parsed.pathname.replace(/\/+$/, "");
-    return parsed.toString().replace(/\/$/, "");
-  } catch {
-    throw new Error("Invalid adapterBaseUrl");
+  if (typeof value !== "string" || value === "") {
+    throw new Error("Missing required config: adapterBaseUrl");
   }
+  // Check literal spelling BEFORE WHATWG parsing can normalize encodings, IPv4
+  // aliases, backslashes, control characters, dot segments, or an empty ?/#.
+  // Only the exact origin and its single root slash are authorized.
+  if (value !== APPROVED_ADAPTER_ORIGIN && value !== `${APPROVED_ADAPTER_ORIGIN}/`) {
+    throw new Error("Invalid adapterBaseUrl: destination not approved (fail closed)");
+  }
+  const parsed = new URL(value);
+  if (parsed.origin !== APPROVED_ADAPTER_ORIGIN || parsed.pathname !== "/"
+    || parsed.username || parsed.password || parsed.search || parsed.hash) {
+    throw new Error("Invalid adapterBaseUrl: destination not approved (fail closed)");
+  }
+  return APPROVED_ADAPTER_ORIGIN;
 }
 
 function isSecretRefBinding(value: unknown): value is EnvSecretRefBinding {
@@ -63,6 +73,8 @@ async function fetchSnapshot(baseUrl: string, token: string): Promise<unknown> {
   // GET only. This is the only fetch in the plugin.
   const response = await fetch(url, {
     method: "GET",
+    // Never follow even same-origin redirects: the only authorized route is /snapshot.
+    redirect: "error",
     headers: { Authorization: `Bearer ${token}` },
   });
   if (!response.ok) {
