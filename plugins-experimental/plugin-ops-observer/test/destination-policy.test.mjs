@@ -60,7 +60,7 @@ for (const destination of rejectedDestinations) {
         let result, error;
         try { result = await handlers.get("ops-snapshot")({ companyId: "policy-company" }); } catch (caught) { error = caught; }
         // Assert hygiene/counters even when the expected rejection is absent.
-        assert.equal(inspect({ result, error, logs, keys: [...worker.cache.keys()], entries: [...worker.cache.values()] }).includes(token), false);
+        assert.equal(inspect({ result, error, logs, keys: [...worker.cache.keys()], entries: [...worker.cache.values()] }, { depth: null }).includes(token), false);
         assert.deepEqual({ resolutions, fetches, tokenReads, cacheReads }, { resolutions: 0, fetches: 0, tokenReads: 0, cacheReads: 0 });
         assert.ok(error instanceof Error, "must reject rather than return cached authoritative data");
         assert.match(error.message, /adapterBaseUrl/);

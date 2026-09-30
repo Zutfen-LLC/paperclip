@@ -47,8 +47,9 @@ buttons because the worker registers no action handlers at all.
 ## Pinned destination trust boundary
 
 The worker pins the approved origin to `http://127.0.0.1:18487`, the dedicated
-local ops-readonly-adapter endpoint from the reviewed manifest deployment default.
-`adapterBaseUrl` may be exactly
+local ops-readonly-adapter endpoint from the reviewed manifest deployment default
+and CT152's existing `ops-observer-tunnel.service` forwarding
+`127.0.0.1:18487` to `127.0.0.1:8487` on Hermes. `adapterBaseUrl` may be exactly
 that literal or `http://127.0.0.1:18487/`; both normalize to the pinned origin.
 This is a code-owned policy, not an arbitrary company-configured URL allowlist.
 Changing the deployed topology requires a separately reviewed code change.
@@ -111,3 +112,32 @@ the worker policy itself is never widened for testing.
 `test/worker.test.mjs` retains GET-only, company-isolated cache, TTL refresh,
 failed-refresh fail-closed, company-scoped secret resolution, token hygiene,
 no-actions, and provenance regressions. Stale-display behavior is unchanged.
+
+## Opt-in bounded cross-integration
+
+After building, operators with access to the existing test topology can run:
+
+```
+PYTHONDONTWRITEBYTECODE=1 python3 test/cross-integration.py <ops-candidate-checkout> <receipt-path>
+```
+
+The harness requires Ops PR #240 at exactly
+`82acd5431e527687b3da0349bb8cc27de04d519f` and verifies the adapter source
+against that Git blob. It starts a temporary candidate listener at the pinned
+origin, reads actual Ops upstream data, then shuts the listener down. If the
+port is occupied, binding fails; no service is stopped or alternate port
+implicitly authorized. It separately executes the exact built worker bundle
+in memory on CT152 through the existing dedicated tunnel, without installation
+or remote file writes. Both probes verify version-1 schema, authenticated reads,
+cache reuse, deterministic TTL expiry, and zero resolution/fetch for rejected
+origins. Candidate upstream requests are instrumented for GET-only behavior
+and absence of forwarded adapter credentials.
+
+Before/after logical database and ordered task/event/run fingerprints, Paperclip
+issue identities, production service identities, and stored plugin config are
+checked for equality. The harness performs no Ops writes or issue creation.
+The company-scoped secret resolver is a harness seam using the existing adapter
+credential, not a live secret-ref migration or full host-bridge certification.
+The existing tunnel still targets the unchanged running adapter; exact-candidate
+proof comes from the separate temporary pinned-origin listener. No production
+provenance/rollout claim is implied by candidate compatibility.
