@@ -621,7 +621,11 @@ function parseUsage(value: unknown): UsageSummary | undefined {
   const source = asRecord(record.usage) ?? record;
   const inputTokens = asNumber(source.input_tokens ?? source.inputTokens ?? source.input, 0);
   const outputTokens = asNumber(source.output_tokens ?? source.outputTokens ?? source.output, 0);
-  const cachedInputTokens = asNumber(source.cached_input_tokens ?? source.cachedInputTokens, 0);
+  const cachedInputTokens = asNumber(
+    source.cache_read_tokens ?? source.cacheReadTokens ?? source.cached_input_tokens ?? source.cachedInputTokens,
+    0,
+  );
+  // cache_write_tokens is deliberately unmapped: UsageSummary has no Paperclip field for it.
   if (inputTokens <= 0 && outputTokens <= 0 && cachedInputTokens <= 0) return undefined;
   return {
     inputTokens,
@@ -644,7 +648,9 @@ function extractSessionId(value: unknown): string | null {
 
 function extractModel(value: unknown): string | null {
   const record = asRecord(value);
-  return nonEmpty(record?.model) ?? nonEmpty(asRecord(record?.usage)?.model);
+  return nonEmpty(asRecord(record?.runtime)?.model)
+    ?? nonEmpty(asRecord(record?.usage)?.model)
+    ?? nonEmpty(record?.model);
 }
 
 function extractErrorMessage(value: unknown): string | null {
@@ -683,7 +689,8 @@ export function mapFinalResultForTest(input: {
     exitCode: mapped.exitCode,
     signal: mapped.signal,
     timedOut: false,
-    provider: "hermes_gateway",
+    provider: nonEmpty(asRecord(payload.runtime)?.provider) ?? nonEmpty(asRecord(payload.usage)?.provider) ?? nonEmpty(payload.provider) ?? "hermes_gateway",
+    usageBasis: "per_run",
     model: extractModel(payload),
     ...(mapped.errorCode ? { errorCode: mapped.errorCode } : {}),
     ...(errorMessage ? { errorMessage } : {}),
@@ -714,12 +721,14 @@ async function stopRun(input: {
   baseUrl: URL;
   headers: Record<string, string>;
   runId: string;
+  signal: AbortSignal;
   redactText?: TextRedactor;
 }): Promise<Record<string, unknown> | null> {
   try {
     const stopped = await fetchJson(apiUrl(input.baseUrl, `/v1/runs/${encodeURIComponent(input.runId)}/stop`), {
       method: "POST",
       headers: input.headers,
+      signal: input.signal,
     });
     await input.ctx.onLog("stdout", `[hermes-gateway] stop requested for run ${input.runId}\n`);
     return asRecord(stopped);
@@ -734,23 +743,53 @@ async function fetchFinalStatus(input: {
   headers: Record<string, string>;
   runId: string;
   deadlineMs: number;
+  signal: AbortSignal;
 }): Promise<Record<string, unknown> | null> {
   const deadline = Date.now() + input.deadlineMs;
-  while (Date.now() < deadline) {
+  while (Date.now() < deadline && !input.signal.aborted) {
     try {
       const status = await fetchJson(apiUrl(input.baseUrl, `/v1/runs/${encodeURIComponent(input.runId)}`), {
         method: "GET",
         headers: input.headers,
+        signal: input.signal,
       });
       const record = asRecord(status);
       const normalized = extractStatus(status);
-      if (normalized && TERMINAL_STATUSES.has(normalized)) return record;
+      const responseRunId = extractRunId(status);
+      if (normalized && TERMINAL_STATUSES.has(normalized) && (!responseRunId || responseRunId === input.runId)) return record;
     } catch {
       return null;
     }
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    try {
+      await delay(Math.min(500, Math.max(0, deadline - Date.now())), input.signal);
+    } catch {
+      return null;
+    }
   }
   return null;
+}
+
+async function requestStopAndFinalStatus(input: {
+  ctx: AdapterExecutionContext;
+  baseUrl: URL;
+  headers: Record<string, string>;
+  runId: string;
+  deadlineMs: number;
+  redactText: TextRedactor;
+}): Promise<{ finalStatus: Record<string, unknown> | null; stopFailed: boolean }> {
+  const controller = new AbortController();
+  const deadline = Date.now() + input.deadlineMs;
+  const timer = setTimeout(() => controller.abort(), input.deadlineMs);
+  const stopResponse = await stopRun({ ...input, signal: controller.signal });
+  const finalStatus = await fetchFinalStatus({
+    baseUrl: input.baseUrl,
+    headers: input.headers,
+    runId: input.runId,
+    deadlineMs: Math.max(0, deadline - Date.now()),
+    signal: controller.signal,
+  });
+  clearTimeout(timer);
+  return { finalStatus, stopFailed: stopResponse === null };
 }
 
 function redactErrorMessage(err: unknown, redactText: TextRedactor = sanitizeSensitiveText): string {
@@ -825,6 +864,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
   const timeoutSec = parseNonNegativeNumber(ctx.config.timeoutSec, DEFAULT_TIMEOUT_SEC);
   const timeoutMs = timeoutSec > 0 ? Math.ceil(timeoutSec * 1000) : 0;
+  const stopGraceMs = Math.floor(clamp(parseNonNegativeNumber(ctx.config.stopGraceMs, STOP_GRACE_MS), 0, 60_000));
   const reconnectMs = Math.floor(clamp(parseNonNegativeNumber(ctx.config.eventReconnectMs, DEFAULT_EVENT_RECONNECT_MS), 250, 30_000));
   const pollIntervalMs = Math.floor(clamp(parseNonNegativeNumber(ctx.config.pollIntervalMs, DEFAULT_POLL_INTERVAL_MS), 250, 10_000));
   const strategy = normalizeSessionKeyStrategy(ctx.config.sessionKeyStrategy);
@@ -859,6 +899,17 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   ]);
   const body = buildRunBody(ctx, sessionKey);
   const createRunUrl = apiUrl(baseUrl, "/v1/runs");
+
+  try {
+    await ctx.onCancellationReady?.();
+  } catch (err) {
+    try {
+      await ctx.onLog("stderr", `[hermes-gateway] cancellation readiness failed: ${redactErrorMessage(err, redactText)}\n`);
+    } catch {
+      // Preserve readiness failure even if logging fails.
+    }
+    return { exitCode: 1, signal: null, timedOut: false, errorCode: "hermes_gateway_cancellation_not_ready", errorMessage: redactErrorMessage(err, redactText) };
+  }
 
   await ctx.onMeta?.({
     adapterType: ADAPTER_TYPE,
@@ -929,14 +980,84 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     if (timeoutMs <= 0) return;
     timeoutTimer = setTimeout(() => resolve("timeout"), timeoutMs);
   });
+  let removeCancellationListener: () => void = () => {};
+  const signal = ctx.signal;
+  const cancellationPromise = signal
+    ? new Promise<unknown>((resolve) => {
+      const onAbort = () => resolve(signal.reason ?? true);
+      if (signal.aborted) {
+        onAbort();
+      } else {
+        signal.addEventListener("abort", onAbort, { once: true });
+        removeCancellationListener = () => signal.removeEventListener("abort", onAbort);
+      }
+    })
+    : new Promise<never>(() => {});
 
-  const outcome = await Promise.race([state.terminalPromise, timeoutPromise]);
+  const outcome = await Promise.race([
+    state.terminalPromise,
+    timeoutPromise,
+    cancellationPromise.then(() => "cancelled" as const),
+  ]);
   if (timeoutTimer) clearTimeout(timeoutTimer);
+  removeCancellationListener();
   controller.abort();
 
+  if (outcome === "cancelled") {
+    const { finalStatus, stopFailed } = await requestStopAndFinalStatus({
+      ctx,
+      baseUrl,
+      headers: eventHeaders,
+      runId,
+      deadlineMs: stopGraceMs,
+      redactText,
+    });
+    const finalRecord = finalStatus ? asRecord(finalStatus) : null;
+    const stopAcked = !stopFailed && finalStatus !== null;
+    const usage = finalRecord ? parseUsage(finalRecord) : undefined;
+    const costUsd = finalRecord ? parseCostUsd(finalRecord) : null;
+    const result: AdapterExecutionResult = {
+      exitCode: 1,
+      signal: "SIGTERM",
+      timedOut: false,
+      provider: "hermes_gateway",
+      usageBasis: "per_run",
+      errorCode: "hermes_gateway_cancelled",
+      errorMessage: `Paperclip run cancelled; Hermes run ${runId} stop requested.`,
+      ...(finalRecord ? { model: extractModel(finalRecord) } : {}),
+      ...(usage ? { usage } : {}),
+      ...(costUsd !== null ? { costUsd } : {}),
+      sessionParams: { hermesRunId: runId, strategy },
+      sessionDisplayId: sessionKey ? redactText(sessionKey) : null,
+      resultJson: {
+        run_id: runId,
+        status: extractStatus(finalStatus) ?? "stop_requested",
+        last_event: state.lastEventName,
+        stop_requested: true,
+        stop_confirmed: stopAcked,
+        ...(stopFailed ? { stop_request_failed: true } : {}),
+        ...(stopAcked ? {
+          executionCancellation: {
+            state: "acknowledged",
+            acknowledgedAt: new Date().toISOString(),
+            proof: "gateway_terminal_status",
+          },
+        } : {}),
+        final_status: redactForLog(finalStatus, [], 0, redactText),
+      },
+    };
+    return result;
+  }
+
   if (outcome === "timeout") {
-    await stopRun({ ctx, baseUrl, headers: eventHeaders, runId, redactText });
-    const finalStatus = await fetchFinalStatus({ baseUrl, headers: eventHeaders, runId, deadlineMs: STOP_GRACE_MS });
+    const { finalStatus } = await requestStopAndFinalStatus({
+      ctx,
+      baseUrl,
+      headers: eventHeaders,
+      runId,
+      deadlineMs: stopGraceMs,
+      redactText,
+    });
     return {
       exitCode: 1,
       signal: null,
@@ -944,6 +1065,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       errorCode: "hermes_gateway_timeout",
       errorMessage: `Hermes gateway run timed out after ${timeoutSec}s.`,
       provider: "hermes_gateway",
+      usageBasis: "per_run",
       resultJson: {
         run_id: runId,
         status: extractStatus(finalStatus) ?? "timeout",
