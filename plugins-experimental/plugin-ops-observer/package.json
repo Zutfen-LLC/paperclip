@@ -1,0 +1,20 @@
+{
+  "name": "@zutfen/plugin-ops-observer",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "description": "Read-only Ops Supervisor observer plugin for Paperclip (bounded integration experiment). Displays Ops-managed work snapshots; holds zero authority over Ops state.",
+  "files": ["dist", "README.md"],
+  "scripts": {
+    "build": "node ./esbuild.config.mjs",
+    "test": "node --test test/",
+    "typecheck": "tsc --noEmit"
+  },
+  "paperclipPlugin": {
+    "manifest": "./dist/manifest.js",
+    "worker": "./dist/worker.js",
+    "ui": "./dist/ui/"
+  },
+  "keywords": ["paperclip", "ops-supervisor", "observer", "read-only"],
+  "license": "MIT"
+}
