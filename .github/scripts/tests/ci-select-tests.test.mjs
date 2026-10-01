@@ -6,10 +6,12 @@ import { fileURLToPath } from "node:url";
 
 import {
   HUB_FANIN,
+  PACKAGE_TESTS,
   PROJECTS,
   RepoIndex,
   SERVER_BUDGET_MS,
   SERVER_SHARD_TARGET_MS,
+  UNRUN_PACKAGES,
   exportedNames,
   extractSpecifiers,
   isBarrel,
@@ -77,8 +79,11 @@ test("extractSpecifiers finds static, dynamic, require and mock specifiers", () 
   );
 });
 
-test("isBarrel recognises re-export-only modules, index files and nothing else", () => {
-  assert.equal(isBarrel("a/index.ts", "const x = 1;"), true);
+test("isBarrel recognises re-export-only modules and nothing else", () => {
+  // Decided by content: an index file with real logic is not a barrel.
+  assert.equal(isBarrel("a/index.ts", 'export * from "./x.js";\n'), true);
+  assert.equal(isBarrel("a/index.ts", "export function bootstrap() { return 1; }\n"), false);
+  assert.equal(isBarrel("a/index.ts", 'export * from "./x.js";\nexport const own = 1;\n'), false);
   assert.equal(isBarrel("a/mod.ts", 'export * from "./x.js";\nexport { y } from "./y.js";\nexport type { Z } from "./z.js";\n'), true);
   assert.equal(isBarrel("a/mod.ts", 'import { a } from "./a.js";\n// nothing else\n'), true);
   assert.equal(isBarrel("a/mod.ts", 'export * from "./x.js";\nexport const own = 1;\n'), false);
@@ -294,15 +299,109 @@ test("files outside the indexed trees are ignored by test selection", () => {
   assert.deepEqual(result.broadReasons, []);
 });
 
+
+test("an index file with real logic selects its importers; a pure barrel does not", () => {
+  const tree = baseTree({
+    "server/src/index.ts": 'import { v } from "./services/plugin-config-validator.js";\nexport function startServer() { return v; }\n',
+    "server/src/__tests__/boot.test.ts": 'import { startServer } from "../index.js";\n',
+  });
+  assert.deepEqual(plan(tree, [change("server/src/index.ts")]).server.files, ["server/src/__tests__/boot.test.ts"]);
+});
+
+test("deleted source and assets: small projects run whole, server assets escalate, tests are ignored", () => {
+  const tree = baseTree({ "packages/db/package.json": JSON.stringify({ name: "@paperclipai/db" }) });
+  const smallProject = plan(tree, [change("packages/db/src/schema/old.ts", "D")]);
+  assert.deepEqual(smallProject.wholeProjects, ["@paperclipai/db"]);
+
+  const serverAsset = plan(tree, [change("server/src/onboarding-assets/guide.md", "D")]);
+  assert.ok(serverAsset.broadReasons.some((reason) => /was deleted and is a runtime asset/.test(reason)));
+
+  const serverCode = plan(tree, [change("server/src/services/old.ts", "D")]);
+  assert.deepEqual(serverCode.broadReasons, []);
+  assert.ok(serverCode.notes.some((note) => /was deleted; typecheck and build cover/.test(note)));
+
+  const deletedTest = plan(tree, [change("server/src/__tests__/gone.test.ts", "D")]);
+  assert.deepEqual([deletedTest.broadReasons, deletedTest.server.files, deletedTest.wholeProjects], [[], [], []]);
+});
+
+test("assets in small projects run the project whole instead of escalating (migrations)", () => {
+  const tree = baseTree({
+    "packages/db/package.json": JSON.stringify({ name: "@paperclipai/db" }),
+    "packages/db/src/migrations/0099_new.sql": "create table t ();\n",
+    "packages/db/src/migrations/meta/_journal.json": "{}\n",
+  });
+  const result = plan(tree, [change("packages/db/src/migrations/0099_new.sql"), change("packages/db/src/migrations/meta/_journal.json")]);
+  assert.deepEqual(result.broadReasons, []);
+  assert.deepEqual(result.wholeProjects, ["@paperclipai/db"]);
+});
+
+test("ui public assets are covered by the build, not escalated", () => {
+  const result = plan(baseTree({ "ui/public/site.webmanifest": "{}\n" }), [change("ui/public/site.webmanifest")]);
+  assert.deepEqual(result.broadReasons, []);
+});
+
+test("changed scripts select their sibling and importing tests for node --test", () => {
+  const tree = baseTree({
+    "scripts/prepare-npm-readme.mjs": "export const prepare = 1;\n",
+    "scripts/prepare-npm-readme.test.mjs": 'import { prepare } from "./prepare-npm-readme.mjs";\n',
+    "scripts/__tests__/prepare-npm-readme-extra.test.mjs": "// named after the script\n",
+    "scripts/__tests__/ensure-plugin-build-deps.test.mjs": 'import "../ensure-plugin-build-deps.mjs";\n',
+    "scripts/ensure-plugin-build-deps.mjs": "export const e = 1;\n",
+    "scripts/unrelated.test.mjs": "",
+  });
+  const result = plan(tree, [change("scripts/prepare-npm-readme.mjs"), change("scripts/ensure-plugin-build-deps.mjs")]);
+  assert.deepEqual(result.scriptTests, [
+    "scripts/__tests__/ensure-plugin-build-deps.test.mjs",
+    "scripts/__tests__/prepare-npm-readme-extra.test.mjs",
+    "scripts/prepare-npm-readme.test.mjs",
+  ]);
+  assert.deepEqual(result.server.files, []);
+});
+
+test("a change inside an allowlisted package runs that package's test script; docs inside it do not", () => {
+  const tree = baseTree();
+  const result = plan(tree, [change("packages/teams-catalog/src/teams.ts"), change("packages/tailscale-https-broker/README.md")]);
+  assert.deepEqual(result.packageTests, ["@paperclipai/teams-catalog"]);
+});
+
+test("a change inside a package with tests CI cannot run leaves a note, not a silent skip", () => {
+  const result = plan(baseTree(), [change("packages/mcp-server/src/tools.ts"), change("packages/plugins/sandbox-providers/e2b/src/index.ts")]);
+  assert.deepEqual(result.packageTests, []);
+  assert.ok(result.notes.some((note) => /packages\/mcp-server has tests this CI does not run/.test(note)));
+  assert.ok(result.notes.some((note) => /sandbox-providers\/ has tests this CI does not run/.test(note)));
+  // The daytona provider is a vitest project, so it gets no such note.
+  const daytona = plan(baseTree(), [change("packages/plugins/sandbox-providers/daytona/src/index.ts")]);
+  assert.ok(!daytona.notes.some((note) => /sandbox-providers/.test(note)));
+});
+
 // ---- guards against the real repository ---------------------------------
 
-test("PROJECTS matches the vitest project names scripts/run-vitest-stable.mjs runs", () => {
+test("PROJECTS covers every project scripts/run-vitest-stable.mjs runs, and extras are root vitest projects", () => {
   const source = readFileSync(path.join(repoRoot, "scripts/run-vitest-stable.mjs"), "utf8");
   const block = /const nonServerProjects = \[([\s\S]*?)\];/.exec(source)?.[1] ?? "";
   const upstream = [...block.matchAll(/"([^"]+)"/g)].map((match) => match[1]);
   assert.ok(upstream.length > 5);
-  const ours = PROJECTS.filter((project) => project.id !== "server").map((project) => project.name);
-  assert.deepEqual([...ours].sort(), [...upstream].sort());
+  const ours = PROJECTS.filter((project) => project.id !== "server");
+  const names = ours.map((project) => project.name);
+  for (const name of upstream) assert.ok(names.includes(name), `${name} is run upstream`);
+  const rootConfig = readFileSync(path.join(repoRoot, "vitest.config.ts"), "utf8");
+  for (const project of ours.filter((candidate) => !upstream.includes(candidate.name))) {
+    assert.ok(rootConfig.includes(`"${project.dir}"`), `${project.dir} must be a project in vitest.config.ts`);
+  }
+});
+
+test("PACKAGE_TESTS and UNRUN_PACKAGES point at real workspace packages", () => {
+  for (const { dir, name } of PACKAGE_TESTS) {
+    const manifest = JSON.parse(readFileSync(path.join(repoRoot, dir, "package.json"), "utf8"));
+    assert.equal(manifest.name, name);
+    assert.ok(manifest.scripts?.test, `${dir} has a test script`);
+    assert.ok(!PROJECTS.some((project) => project.dir === dir), `${dir} is not also a vitest project`);
+  }
+  for (const { dir, why } of UNRUN_PACKAGES) {
+    assert.ok(existsSync(path.join(repoRoot, dir.replace(/\/$/, ""))), dir);
+    assert.ok(why.length > 10);
+    assert.ok(!PACKAGE_TESTS.some((entry) => entry.dir === dir.replace(/\/$/, "")));
+  }
 });
 
 test("every PROJECTS entry is a real package with that name", () => {

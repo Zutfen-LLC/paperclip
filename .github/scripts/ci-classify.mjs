@@ -172,16 +172,16 @@ const CLASS_LANES = {
   adapters: ["static", "tests"],
   plugins: ["static", "tests"],
   observer: ["observer"],
-  mcp: ["static"],
+  mcp: ["static", "tests"],
   ui: ["static", "tests", "token_gates"],
   server: ["static", "tests"],
   cli: ["static", "tests"],
-  scripts: ["static", "release_registry"],
+  scripts: ["static", "release_registry", "tests"],
   e2e: ["static", "e2e_typecheck"],
 };
 
 // Extra checks that run inside an existing job rather than as a lane.
-export const STEP_FLAGS = ["release_registry", "token_gates", "e2e_typecheck", "docker_context"];
+export const STEP_FLAGS = ["release_registry", "token_gates", "e2e_typecheck", "docker_context", "script_tests"];
 
 export function classifyChanges(files) {
   const byClass = {};
@@ -206,10 +206,10 @@ export function classifyChanges(files) {
   if (contextTouching) flags.add("docker_context");
 
   // The broad tier runs the full inventory, which covers every focused lane
-  // and step except these: ci-full.yml has no CI self-test, builds the
-  // production image only outside pull requests, and lints only the
-  // fork-owned workflows. A broad plan keeps them when its diff selects them.
-  const uncoveredByFull = new Set(["docker", "ci_check", "ci_selftest"]);
+  // and step except these: ci-full.yml has no CI self-test and builds the
+  // production image only outside pull requests. A broad plan keeps them when
+  // its diff selects them.
+  const uncoveredByFull = new Set(["docker", "ci_selftest"]);
   const lane = (id) => flags.has(id) && (!broad || uncoveredByFull.has(id));
 
   const lanes = {
@@ -230,6 +230,8 @@ export function classifyChanges(files) {
     token_gates: !broad && flags.has("token_gates"),
     e2e_typecheck: !broad && flags.has("e2e_typecheck"),
     docker_context: !broad && flags.has("docker_context"),
+    // Set by ci-plan.mjs once the test selection knows which script tests apply.
+    script_tests: false,
   };
   return { classes, byClass, broad, broadReasons, needsTests: !broad && flags.has("tests"), lanes, steps };
 }

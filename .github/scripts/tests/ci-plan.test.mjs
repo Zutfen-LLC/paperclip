@@ -11,6 +11,8 @@ function selection(overrides = {}) {
     server: { files: [], estMs: 0, shards: 0 },
     ui: { whole: false, files: [] },
     wholeProjects: [],
+    packageTests: [],
+    scriptTests: [],
     broadReasons: [],
     notes: [],
     ...overrides,
@@ -50,6 +52,25 @@ test("selected server suites turn on the server lane with the planned shard list
   assert.deepEqual(plan.serverShards, [1, 2]);
 });
 
+test("script tests become a step on the static lane", () => {
+  const plan = buildPlan({
+    changes: [change("scripts/prepare-npm-readme.mjs")],
+    selectPlan: () => selection({ scriptTests: ["scripts/prepare-npm-readme.test.mjs"] }),
+  });
+  assert.equal(plan.steps.script_tests, true);
+  assert.equal(plan.lanes.static, true);
+  assert.equal(plan.lanes.tests_workspaces, false);
+  assert.equal(buildPlan({ changes: [change("scripts/a.mjs")], selectPlan: () => selection() }).steps.script_tests, false);
+});
+
+test("package tests turn on the workspace lane", () => {
+  const plan = buildPlan({
+    changes: [change("packages/teams-catalog/src/a.ts")],
+    selectPlan: () => selection({ packageTests: ["@paperclipai/teams-catalog"] }),
+  });
+  assert.equal(plan.lanes.tests_workspaces, true);
+});
+
 test("workspace tests turn on for whole projects or selected ui suites", () => {
   const wholeProject = buildPlan({
     changes: [change("packages/shared/src/a.ts")],
@@ -86,7 +107,7 @@ test("escalating a selection keeps the lanes the full inventory does not cover",
     selectPlan: () => selection({ broadReasons: ["server selection is 500 files"] }),
   });
   assert.equal(plan.broad, true);
-  assert.deepEqual(on(plan.lanes), ["ci_check", "ci_selftest", "docker", "full", "policy"]);
+  assert.deepEqual(on(plan.lanes), ["ci_selftest", "docker", "full", "policy"]);
 });
 
 test("infra and unknown paths are broad without consulting the selector", () => {

@@ -21,7 +21,7 @@ import { planFromGit } from "./ci-select-tests.mjs";
 // off except the ones that inventory does not cover (see ci-classify.mjs).
 function broadLanes(lanes) {
   return Object.fromEntries(
-    LANE_IDS.map((id) => [id, id === "policy" || id === "full" || (["docker", "ci_check", "ci_selftest"].includes(id) && lanes[id])]),
+    LANE_IDS.map((id) => [id, id === "policy" || id === "full" || (["docker", "ci_selftest"].includes(id) && lanes[id])]),
   );
 }
 
@@ -40,8 +40,13 @@ export function buildPlan({ changes, selectPlan = planFromGit }) {
       lanes = {
         ...lanes,
         tests_server: selection.server.files.length > 0,
-        tests_workspaces: selection.wholeProjects.length > 0 || selection.ui.whole || selection.ui.files.length > 0,
+        tests_workspaces:
+          selection.wholeProjects.length > 0 ||
+          selection.ui.whole ||
+          selection.ui.files.length > 0 ||
+          selection.packageTests.length > 0,
       };
+      steps = { ...steps, script_tests: selection.scriptTests.length > 0 };
     }
   }
   if (broad) {

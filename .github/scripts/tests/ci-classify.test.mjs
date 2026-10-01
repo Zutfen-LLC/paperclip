@@ -161,7 +161,7 @@ const SIMULATIONS = {
     classes: ["docker", "scripts"],
     lanes: ["docker", "policy", "static"],
     steps: ["docker_context", "release_registry"],
-    needsTests: false,
+    needsTests: true,
   },
   "shared-sdk-schema-plus-observer (PR 6 shape)": {
     files: [
@@ -226,12 +226,13 @@ test("broad classes override everything else and zero the focused lanes", () => 
 });
 
 test("a broad plan still runs the lanes the full inventory does not cover", () => {
+  // ci-full.yml lints workflows (the changed ones too) but has no self-test.
   const withCi = classifyChanges(["pnpm-lock.yaml", ".github/workflows/ci.yml"]);
-  assert.deepEqual(selected(withCi.lanes), ["ci_check", "ci_selftest", "full", "policy"]);
+  assert.deepEqual(selected(withCi.lanes), ["ci_selftest", "full", "policy"]);
   const withDocker = classifyChanges(["pnpm-lock.yaml", "docker/docker-compose.yml"]);
   assert.deepEqual(selected(withDocker.lanes), ["docker", "full", "policy"]);
   const withUpstreamWorkflow = classifyChanges(["pnpm-lock.yaml", ".github/workflows/pr.yml"]);
-  assert.deepEqual(selected(withUpstreamWorkflow.lanes), ["ci_check", "full", "policy"]);
+  assert.deepEqual(selected(withUpstreamWorkflow.lanes), ["full", "policy"]);
   // Extra steps belong to lanes the full inventory replaces.
   assert.deepEqual(onSteps(withCi.steps), []);
 });

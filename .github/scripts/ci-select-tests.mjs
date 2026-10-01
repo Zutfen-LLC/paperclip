@@ -60,6 +60,13 @@ export const PROJECTS = [
   { id: "db", name: "@paperclipai/db", dir: "packages/db", lib: true },
   { id: "adapter-utils", name: "@paperclipai/adapter-utils", dir: "packages/adapter-utils", lib: true },
   { id: "claude-local", name: "@paperclipai/adapter-claude-local", dir: "packages/adapters/claude-local", lib: true },
+  // The next four are vitest projects in the root config that
+  // scripts/run-vitest-stable.mjs never runs, so upstream CI skips them. They
+  // pass in the toolchain container, so the focused tier runs them when touched.
+  { id: "cursor-cloud", name: "@paperclipai/adapter-cursor-cloud", dir: "packages/adapters/cursor-cloud", lib: true },
+  { id: "gemini-local", name: "@paperclipai/adapter-gemini-local", dir: "packages/adapters/gemini-local", lib: true },
+  { id: "kimi-local", name: "@paperclipai/adapter-kimi-local", dir: "packages/adapters/kimi-local", lib: true },
+  { id: "pi-local", name: "@paperclipai/adapter-pi-local", dir: "packages/adapters/pi-local", lib: true },
   { id: "codex-local", name: "@paperclipai/adapter-codex-local", dir: "packages/adapters/codex-local", lib: true },
   { id: "grok-local", name: "@paperclipai/adapter-grok-local", dir: "packages/adapters/grok-local", lib: true },
   { id: "openclaw-gateway", name: "@paperclipai/adapter-openclaw-gateway", dir: "packages/adapters/openclaw-gateway", lib: true },
@@ -67,6 +74,30 @@ export const PROJECTS = [
   { id: "plugin-daytona", name: "@paperclipai/plugin-daytona", dir: "packages/plugins/sandbox-providers/daytona" },
   { id: "plugin-sdk", name: "@paperclipai/plugin-sdk", dir: "packages/plugins/sdk", lib: true },
   { id: "create-paperclip-plugin", name: "@paperclipai/create-paperclip-plugin", dir: "packages/plugins/create-paperclip-plugin" },
+];
+
+// Workspace packages with their own `test` script and no vitest project.
+// Upstream CI does not run these either; they pass in the toolchain container,
+// so a change inside one runs `pnpm --filter <name> test`. The runner and the
+// Ops observer have their own lanes.
+export const PACKAGE_TESTS = [
+  { dir: "packages/adapters/hermes", name: "@paperclipai/hermes-paperclip-adapter" },
+  { dir: "packages/google-sheets-mcp-server", name: "@paperclipai/google-sheets-mcp-server" },
+  { dir: "packages/kv-demo-mcp-server", name: "@paperclipai/kv-demo-mcp-server" },
+  { dir: "packages/plugins/examples/plugin-authoring-smoke-example", name: "@paperclipai/plugin-authoring-smoke-example" },
+  { dir: "packages/plugins/paperclip-plugin-fake-sandbox", name: "@paperclipai/plugin-fake-sandbox" },
+  { dir: "packages/plugins/plugin-workspace-diff", name: "@paperclipai/plugin-workspace-diff" },
+  { dir: "packages/tailscale-https-broker", name: "@paperclipai/tailscale-https-broker" },
+  { dir: "packages/teams-catalog", name: "@paperclipai/teams-catalog" },
+];
+
+// Packages that have tests this CI cannot run. A change inside one gets a note
+// in the plan; typecheck and build still cover it.
+export const UNRUN_PACKAGES = [
+  { dir: "packages/adapters/cursor-local", why: "a sandbox test fails in the toolchain container (tar extraction) on the current base" },
+  { dir: "packages/mcp-server", why: "tools.test.ts fails on the current base" },
+  { dir: "packages/plugins/plugin-llm-wiki", why: "two test files fail to load on the current base" },
+  { dir: "packages/plugins/sandbox-providers/", why: "standalone packages outside the pnpm workspace (the daytona provider is a vitest project)" },
 ];
 
 const RUNNER_SOURCE = /^packages\/paperclip-runner\/(?:src|runner|protocol|generated)\//;
@@ -109,9 +140,9 @@ export function extractSpecifiers(source) {
 }
 
 // A barrel only re-exports. Changing one changes an export surface, which
-// typecheck and build verify, so importer-based selection skips it.
+// typecheck and build verify, so importer-based selection skips it. Decided by
+// content, not by the name `index`: server/src/index.ts holds real logic.
 export function isBarrel(file, source) {
-  if (/^index\.[cm]?[jt]sx?$/.test(path.posix.basename(file))) return true;
   const residue = stripComments(source)
     .replace(/\bexport\s+(?:type\s+)?(?:\*(?:\s+as\s+[\w$]+)?|\{[^}]*\})\s+from\s+(['"])[^'"]+\1\s*;?/g, "")
     .replace(/\bimport\s+[^;]*?\bfrom\s+(['"])[^'"]+\1\s*;?/g, "")
@@ -254,7 +285,12 @@ export function planTests({ files, read, changes, classes = [], durations = {} }
   };
 
   const live = changes.filter((change) => change.status !== "D");
+  const deleted = changes.filter((change) => change.status === "D");
   const touched = changes.filter((change) => projectOf(change.path));
+  // Directory whose test files are named after a changed file's stem.
+  const ownerDir = (file) => projectOf(file)?.dir ?? (file.startsWith("scripts/") ? "scripts" : null);
+  const isDocFile = (file) => DOC_BASENAME.test(path.posix.basename(file));
+  const isReadFromDisk = (file) => !CODE_FILE.test(file) && !STATIC_ASSET.test(file) && !isDocFile(file);
 
   // Project-level configuration changes select the whole project.
   for (const change of touched) {
@@ -284,8 +320,8 @@ export function planTests({ files, read, changes, classes = [], durations = {} }
   for (const change of live) {
     const file = change.path;
     const project = projectOf(file);
-    // Only server, ui, cli and packages are indexed. Other trees (the
-    // experimental plugin, scripts, docs) have their own lanes.
+    // Only server, ui, cli, packages and scripts are indexed. Other trees (the
+    // experimental plugin, docs) have their own lanes.
     if (!index.files.has(file)) continue;
     if (TEST_FILE.test(file)) {
       if (testSet.has(file)) add(file, "changed");
@@ -294,24 +330,32 @@ export function planTests({ files, read, changes, classes = [], durations = {} }
     }
 
     if (!CODE_FILE.test(file)) {
-      if (!project || STATIC_ASSET.test(file) || DOC_BASENAME.test(path.posix.basename(file))) continue;
-      if (project.id !== "server" && project.id !== "ui" && project.id !== "cli" && !project.lib) continue;
-      const importers = index.importers.get(file);
-      if (!importers || importers.size === 0) {
-        broadReasons.push(`${file} is a runtime asset no import reaches; tests that read it cannot be selected`);
-      } else {
-        for (const importer of importers) {
-          if (testSet.has(importer)) add(importer, `imports ${file}`);
+      const dir = ownerDir(file);
+      if (dir) for (const test of siblingTests(index, { dir }, file, tests)) add(test, `named after ${file}`);
+      if (!project || STATIC_ASSET.test(file) || isDocFile(file)) continue;
+      if (project.big) {
+        // Tests reach these files by import (fixtures, css) or by reading them
+        // from disk. A file nothing imports has dependents no selection can see.
+        // Migrations and package assets live in small projects, which run whole.
+        const importers = index.importers.get(file);
+        if (importers && importers.size > 0) {
+          for (const importer of importers) {
+            if (testSet.has(importer)) add(importer, `imports ${file}`);
+          }
+        } else if (!file.startsWith("ui/public/")) {
+          broadReasons.push(`${file} is a runtime asset no import reaches; tests that read it cannot be selected`);
         }
+      } else {
+        wholeProjects.set(project.id, `${file} changed`);
       }
-      if (project && !project.big) wholeProjects.set(project.id, `${file} changed`);
       continue;
     }
 
     if (project && !project.big) wholeProjects.set(project.id, `${file} changed`);
     const source = index.sources.get(file) ?? "";
     const barrel = isBarrel(file, source);
-    for (const test of siblingTests(index, project ?? { dir: "" }, file, tests)) add(test, `named after ${file}`);
+    const dir = ownerDir(file);
+    if (dir) for (const test of siblingTests(index, { dir }, file, tests)) add(test, `named after ${file}`);
     if (barrel) {
       notes.push(`${file} is a re-export barrel; typecheck and build cover its export surface`);
       continue;
@@ -329,6 +373,39 @@ export function planTests({ files, read, changes, classes = [], durations = {} }
     }
     if (project?.lib) symbolFiles.push({ file, names: exportedNames(source) });
     else if (selected.size === before) uncovered.push(file);
+  }
+
+  // A deleted file leaves nothing to walk from. Small projects run whole. In
+  // server and ui, importers of a deleted module fail typecheck, but a deleted
+  // runtime asset may be read from disk by tests no import reveals.
+  for (const change of deleted) {
+    const file = change.path;
+    const project = projectOf(file);
+    if (!project || TEST_FILE.test(file)) continue;
+    if (!project.big) {
+      wholeProjects.set(project.id, `${file} was deleted`);
+    } else if (isReadFromDisk(file) && !file.startsWith("ui/public/")) {
+      broadReasons.push(`${file} was deleted and is a runtime asset; tests that read it cannot be selected`);
+    } else {
+      notes.push(`${file} was deleted; typecheck and build cover what imported it`);
+    }
+  }
+
+  // Packages with their own test script, and packages whose tests cannot run.
+  const packageTests = new Set();
+  for (const change of changes) {
+    const file = change.path;
+    if (isDocFile(file)) continue;
+    for (const entry of PACKAGE_TESTS) {
+      if (file.startsWith(`${entry.dir}/`)) packageTests.add(entry.name);
+    }
+    for (const entry of UNRUN_PACKAGES) {
+      const prefix = entry.dir.endsWith("/") ? entry.dir : `${entry.dir}/`;
+      if (file.startsWith(prefix) && !projectOf(file)) {
+        const note = `${entry.dir} has tests this CI does not run: ${entry.why}`;
+        if (!notes.includes(note)) notes.push(note);
+      }
+    }
   }
 
   // Shared-library exports reach consumers through a barrel, which the import
@@ -367,7 +444,17 @@ export function planTests({ files, read, changes, classes = [], durations = {} }
     }
   }
 
-  const result = { server: null, ui: null, wholeProjects: [], broadReasons, notes, reasons: Object.fromEntries(selected) };
+  const scriptTests = [...selected.keys()].filter((test) => test.startsWith("scripts/") && /\.test\.(?:mjs|js|cjs)$/.test(test)).sort();
+  const result = {
+    server: null,
+    ui: null,
+    wholeProjects: [],
+    packageTests: [...packageTests].sort(),
+    scriptTests,
+    broadReasons,
+    notes,
+    reasons: Object.fromEntries(selected),
+  };
 
   const serverProject = PROJECTS.find((project) => project.id === "server");
   let serverFiles;
@@ -414,7 +501,7 @@ export function loadDurations(root = repoRootDefault) {
 }
 
 export function planFromGit({ root = repoRootDefault, changes, classes }) {
-  const tracked = git(["ls-files", "-z", "--", "server", "ui", "cli", "packages"], root).split("\0").filter(Boolean);
+  const tracked = git(["ls-files", "-z", "--", "server", "ui", "cli", "packages", "scripts"], root).split("\0").filter(Boolean);
   const read = (file) => {
     try {
       return readFileSync(path.join(root, file), "utf8");
@@ -442,14 +529,15 @@ function sandboxEnv(label) {
   return env;
 }
 
-function vitest(args, label) {
+function run(command, args, label) {
   console.log(`\n[ci-select-tests] ${label}`);
-  const result = spawnSync("pnpm", ["exec", "vitest", "run", "--exclude", "**/dist/**", ...args], {
-    stdio: "inherit",
-    env: sandboxEnv(label.replace(/\W+/g, "-")),
-  });
+  const result = spawnSync(command, args, { stdio: "inherit", env: sandboxEnv(label.replace(/\W+/g, "-")) });
   if (result.error) throw result.error;
   if (result.status !== 0) process.exit(result.status ?? 1);
+}
+
+function vitest(args, label) {
+  run("pnpm", ["exec", "vitest", "run", "--exclude", "**/dist/**", ...args], label);
 }
 
 export function runGroup({ group, plan, shard, durations }) {
@@ -467,6 +555,11 @@ export function runGroup({ group, plan, shard, durations }) {
     }
     if (plan.ui.whole) vitest(["--project", "@paperclipai/ui"], "ui (whole project)");
     else if (plan.ui.files.length > 0) vitest(["--project", "@paperclipai/ui", ...plan.ui.files], `ui: ${plan.ui.files.length} selected suites`);
+    for (const name of plan.packageTests) run("pnpm", ["--filter", name, "test"], `package tests: ${name}`);
+    return;
+  }
+  if (group === "scripts") {
+    if (plan.scriptTests.length > 0) run("node", ["--test", ...plan.scriptTests], `script tests: ${plan.scriptTests.length} files`);
     return;
   }
   throw new Error(`unknown group ${group}`);
@@ -486,7 +579,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   const [command] = args._;
   const { listChangedFiles, classifyChanges } = await import("./ci-classify.mjs");
   if (!["plan", "run"].includes(command) || !args.base || !args.head) {
-    console.error("usage: ci-select-tests.mjs plan|run --base SHA --head SHA [--group server|workspaces] [--shard I/N]");
+    console.error("usage: ci-select-tests.mjs plan|run --base SHA --head SHA [--group server|workspaces|scripts] [--shard I/N]");
     process.exit(2);
   }
   const changes = listChangedFiles({ base: args.base, head: args.head });
