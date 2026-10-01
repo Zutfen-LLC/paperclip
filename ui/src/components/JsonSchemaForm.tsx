@@ -7,7 +7,7 @@ import {
   Plus,
   Trash2,
 } from "lucide-react";
-import { isUuidLike, type EnvSecretRefBinding } from "@paperclipai/shared";
+import { envBindingSecretRefSchema, isUuidLike, type EnvSecretRefBinding } from "@paperclipai/shared";
 import { cn } from "@/lib/utils";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -194,7 +194,7 @@ export function validateField(
   if (type === "secret-ref" && isSecretRefBinding(value)) {
     return null;
   }
-  if (type === "secret-ref" && typeof value === "object") {
+  if (type === "secret-ref" && (typeof value === "object" || schema.type === "object")) {
     return "Invalid secret reference";
   }
   if (type === "object" && (typeof value !== "object" || Array.isArray(value))) {
@@ -459,13 +459,7 @@ BooleanField.displayName = "BooleanField";
 const ENUM_UNSET_VALUE = "__paperclip_unset__";
 
 function isSecretRefBinding(value: unknown): value is EnvSecretRefBinding {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    !Array.isArray(value) &&
-    (value as { type?: unknown }).type === "secret_ref" &&
-    typeof (value as { secretId?: unknown }).secretId === "string"
-  );
+  return envBindingSecretRefSchema.strict().safeParse(value).success;
 }
 
 /**
@@ -551,9 +545,10 @@ EnumField.displayName = "EnumField";
 
 /**
  * Specialized field for secret-ref values. Renders a picker for existing
- * company secrets plus a raw-value fallback. A UUID-shaped value is treated
- * as a bound secret reference; anything else is a raw value that the server
- * converts to a stored secret on save.
+ * company secrets. Object-only schemas require the canonical binding and never
+ * offer plaintext input. Legacy string schemas (such as sandbox-provider config)
+ * keep their raw-value/UUID compatibility; their owning API defines its handling.
+ * The generic plugin config API does not encrypt plaintext on save.
  */
 const SecretField = React.memo(({
   value,
@@ -565,6 +560,7 @@ const SecretField = React.memo(({
   error,
   defaultValue,
   maxLength,
+  referenceOnly,
 }: {
   value: unknown;
   onChange: (val: unknown) => void;
@@ -575,6 +571,7 @@ const SecretField = React.memo(({
   error?: string;
   defaultValue?: unknown;
   maxLength?: number;
+  referenceOnly: boolean;
 }) => {
   const [isVisible, setIsVisible] = useState(false);
   const isTextArea = maxLength != null && maxLength > TEXTAREA_THRESHOLD;
@@ -582,7 +579,7 @@ const SecretField = React.memo(({
   const secretRefValue = isSecretRefBinding(value) ? value : null;
   const stringValue = typeof value === "string" ? value : "";
   const trimmed = stringValue.trim();
-  const legacySecretId = trimmed.length > 0 && isUuidLike(trimmed) ? trimmed : null;
+  const legacySecretId = !referenceOnly && trimmed.length > 0 && isUuidLike(trimmed) ? trimmed : null;
   const isBoundToSecret = secretRefValue !== null || legacySecretId !== null;
   const hasRawValue = stringValue.length > 0 && !isBoundToSecret;
 
@@ -613,10 +610,10 @@ const SecretField = React.memo(({
         setShowRawInput(false);
         setIsVisible(false);
       } else {
-        onChange("");
+        onChange(referenceOnly ? undefined : "");
       }
     },
-    [onChange],
+    [onChange, referenceOnly],
   );
 
   const rawInput = isTextArea ? (
@@ -708,7 +705,7 @@ const SecretField = React.memo(({
       label={label}
       description={
         description ||
-        "Pick an existing organization secret, or paste a raw value (Paperclip will store it as a secret on save)."
+        (referenceOnly ? "Pick an existing organization secret." : "Pick an existing organization secret, or paste a raw value. Raw input protection depends on the owning API.")
       }
       required={isRequired}
       error={error}
@@ -721,10 +718,10 @@ const SecretField = React.memo(({
           label=""
           placeholder="Select an existing secret"
           allowVersionSelector={false}
-          emptyHint="No active secrets yet. Create one or paste a raw value below."
+          emptyHint={referenceOnly ? "No active secrets yet. Create one in organization secrets." : "No active secrets yet. Create one or paste a raw value below."}
           disabled={disabled}
         />
-        {!isBoundToSecret ? (
+        {!referenceOnly && !isBoundToSecret ? (
           showRawInput ? (
             <div className="space-y-1">
               {rawInput}
@@ -1172,6 +1169,7 @@ const FormField = React.memo(({
           error={error}
           defaultValue={propSchema.default}
           maxLength={typeof propSchema.maxLength === "number" ? propSchema.maxLength : undefined}
+          referenceOnly={propSchema.type === "object"}
         />
       );
 

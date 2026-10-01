@@ -25,6 +25,12 @@ export const envBindingSecretRefSchema = z.object({
   projectionAllowlistKey: z.string().trim().min(1).max(160).optional().nullable(),
 });
 
+/** Canonical plugin config shape; keep the marker used by the host and picker. */
+export const envBindingSecretRefJsonSchema = {
+  ...z.toJSONSchema(envBindingSecretRefSchema, { target: "draft-7" }),
+  format: "secret-ref",
+};
+
 export const envBindingUserSecretRefSchema = z.object({
   type: z.literal("user_secret_ref"),
   key: secretKeySchema,

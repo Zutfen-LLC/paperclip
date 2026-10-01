@@ -34,9 +34,11 @@ export function validateInstanceConfig(
   // ajv-formats v3 default export is a FormatsPlugin object; call it as a plugin.
   const applyFormats = (addFormats as any).default ?? addFormats;
   applyFormats(ajv);
-  // Register the secret-ref format used by plugin manifests to mark fields that
-  // hold a Paperclip secret UUID rather than a raw value. The format is a UI
-  // hint only — UUID validation happens in the secrets handler at resolve time.
+  // Preserve the host/UI marker for object-shaped EnvSecretRefBinding fields.
+  // A format does not override JSON Schema type constraints. Manifests must
+  // declare the canonical object shape (envBindingSecretRefJsonSchema); its
+  // properties validate the UUID and version. Company ownership and persisted
+  // plugin/configPath bindings are enforced by the route and secrets handler.
   ajv.addFormat("secret-ref", { validate: () => true });
   const validate = ajv.compile(schema);
   const valid = validate(configJson);

@@ -52,6 +52,20 @@ describe("extractSecretRefBindingsFromConfig", () => {
 });
 
 describe("createPluginSecretsHandler fail-closed guards", () => {
+  it("never echoes malformed input in resolution errors", async () => {
+    const db = { select: vi.fn() };
+    const handler = createPluginSecretsHandler({ db: db as never, pluginId });
+    for (const secretRef of ["private-sentinel", { type: "plain", value: "private-sentinel" }]) {
+      let caught: unknown;
+      try {
+        await handler.resolve({ companyId: randomUUID(), secretRef: secretRef as never });
+      } catch (err) { caught = err; }
+      expect(caught).toBeInstanceOf(Error);
+      expect((caught as Error).message.includes("private-sentinel")).toBe(false);
+      expect((caught as Error).message).toBe('Invalid secret reference for plugin. Use { type: "secret_ref", secretId, version? }');
+    }
+    expect(db.select).not.toHaveBeenCalled();
+  });
   it("requires company context before touching the database", async () => {
     const db = { select: vi.fn(() => { throw new Error("db should not be touched"); }) };
     const handler = createPluginSecretsHandler({ db: db as never, pluginId });

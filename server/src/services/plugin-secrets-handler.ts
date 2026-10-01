@@ -20,10 +20,10 @@ import { unprocessable } from "../errors.js";
 // Error helpers
 // ---------------------------------------------------------------------------
 
-function invalidSecretRef(secretRef: unknown): Error {
-  const rendered = typeof secretRef === "string" ? secretRef : JSON.stringify(secretRef);
+function invalidSecretRef(): Error {
+  // The rejected input may itself be plaintext credential material. Never echo it.
   const err = new Error(
-    `Invalid secret reference for plugin: ${rendered ?? "<empty>"}. Use { type: "secret_ref", secretId, version? }`,
+    'Invalid secret reference for plugin. Use { type: "secret_ref", secretId, version? }',
   );
   err.name = "InvalidSecretRefError";
   return err;
@@ -222,11 +222,11 @@ export function createPluginSecretsHandler(
   return {
     async resolve(params: PluginSecretsResolveParams): Promise<string> {
       if (typeof params.secretRef === "string") {
-        throw invalidSecretRef(params.secretRef.trim() || "<empty>");
+        throw invalidSecretRef();
       }
 
       const bindingRef = parseSecretRefBinding(params.secretRef);
-      if (!bindingRef) throw invalidSecretRef(params.secretRef);
+      if (!bindingRef) throw invalidSecretRef();
 
       const companyId = requireCompanyId(params.companyId);
 
