@@ -33,7 +33,8 @@ as job outputs and a step summary. A normal run starts three to five lane jobs.
 `verify` is the only check to require in branch protection. It reads the plan
 and fails unless every lane the plan selected succeeded; lanes the plan skipped
 are fine; a failed or cancelled job always fails it; and if `classify` did not
-succeed, nothing was validated and it fails.
+succeed, nothing was validated and it fails. It does not run when the whole run
+is cancelled (a newer push supersedes it).
 
 ## Path classification
 
@@ -53,11 +54,11 @@ wins; the union of classes selects lanes.
 | adapters | `packages/adapters/**` | static, tests |
 | plugins | `packages/plugins/**` (rest) | static, tests |
 | observer | `plugins-experimental/**` | observer |
-| mcp | `packages/{mcp-server,google-sheets-mcp-server,kv-demo-mcp-server,tailscale-https-broker}/**` | static |
+| mcp | `packages/{mcp-server,google-sheets-mcp-server,kv-demo-mcp-server,tailscale-https-broker}/**` | static, package tests |
 | ui | `ui/**` | static, tests, token gates |
 | server | `server/**` | static, tests |
 | cli | `cli/**` | static, tests |
-| scripts | `scripts/**` | static, release registry tests |
+| scripts | `scripts/**` | static, release registry tests, script tests |
 | e2e | `tests/**` | static, test-suite typechecks |
 | assets | `announcements/**`, `skills/**`, `skills-releases/**`, `tools/**` | **broad** |
 | unknown | anything else | **broad** |
@@ -69,10 +70,9 @@ Two rules keep this conservative:
 - **Markdown inside a package is not docs.** The runner's drift checks and the
   Docker context read committed markdown there.
 
-A broad plan replaces the focused lanes with the full inventory, except three
+A broad plan replaces the focused lanes with the full inventory, except two
 lanes `ci-full.yml` does not cover: `docker` (the pull request build of the
-production image), `ci_check` (lint of changed upstream workflows) and
-`ci_selftest`. Those still run when the diff selects them.
+production image) and `ci_selftest`. Those still run when the diff selects them.
 
 The Docker context-integrity check (about 15 seconds) runs inside the `policy`
 job for any change that is not docs, evals, CI-only or observer-only.
@@ -88,22 +88,42 @@ suites. The selector bounds the walk instead:
 1. A changed test file runs.
 2. Tests that import a changed file directly run.
 3. Tests that import it through one intermediate module run, unless the
-   intermediate is a re-export barrel, or a hub that more than 30 tests import.
+   intermediate is a re-export barrel (judged by content, not by the name
+   `index`), or a hub that more than 30 tests import.
 4. Tests named after a changed file run (`foo.ts` → `foo.test.ts`, `foo-x.test.ts`).
 5. For shared-library packages (their exports reach consumers through a
    barrel), tests that mention an exported name of 5+ characters run.
 6. Runner source changes add the server suites that drive the Runner binary.
 7. A change to a project's own test configuration (`vitest.config`, setup
    files, `package.json`) runs the whole project.
+8. A deleted file in a small project runs that project whole.
+9. Changes under `scripts/` run the `scripts/**/*.test.*` files named after
+   them or importing them, with `node --test`.
+10. A change inside one of the packages listed in `PACKAGE_TESTS` runs
+    `pnpm --filter <package> test`.
 
-`server` and `ui` run only their selected files. The other projects (shared, db,
-adapters, SDK, CLI, ...) are small and run whole when anything in or around them
-is selected.
+`server` and `ui` run only their selected files. The other vitest projects
+(shared, db, adapters, SDK, CLI, ...) are small and run whole when anything in or
+around them is selected. Four adapters (cursor-cloud, gemini-local, kimi-local,
+pi-local) are vitest projects in the root config that upstream CI never runs;
+they pass in the toolchain container, so the focused tier runs them when touched.
+
+Tests this CI **does not run**, listed in `UNRUN_PACKAGES` and noted in the plan
+when a change lands inside one: `cursor-local` (a sandbox test fails in the
+container on the current base), `mcp-server` (`tools.test.ts` fails on the
+current base), `plugin-llm-wiki` (two test files fail to load), and the sandbox
+providers other than daytona (standalone packages outside the pnpm workspace).
+Upstream's pull request CI runs none of these either. Fix the test, then move
+the package to `PACKAGE_TESTS` or `PROJECTS`.
 
 **Escalation, not truncation.** The server tier has a budget of three shards of
 5.5 recorded minutes each. A larger selection, a whole-server selection, or a
-changed runtime asset that no import reaches (server reads it from disk, so no
-test can be selected for it) makes the plan **broad** and runs `ci-full.yml`.
+changed or deleted runtime asset in `server` or `ui` that no import reaches
+(tests read it from disk, so none can be selected for it) makes the plan
+**broad** and runs `ci-full.yml`. Assets inside small projects, such as
+database migrations, run that project whole instead. A schema change to a
+central table still selects a large share of the server suites through its
+exported names and therefore goes broad.
 
 **What selection cannot see.** It is a heuristic over a static import graph.
 Typecheck and build run on every code change and catch removed or renamed
@@ -135,9 +155,9 @@ fewer, better-packed jobs:
 | serialized server (1..3/3) | route/authz suites, 3 shards |
 | workspaces | `general-workspaces-a` then `-b` |
 | runner vitest, runner checks | runner vitest lane; runner static + Rust |
-| typecheck + build | `typecheck:build-gaps`, release registry tests, build, token gates |
+| typecheck + build | `typecheck:build-gaps`, release registry tests, build, token gates, e2e/acceptance/lifecycle typechecks |
 | ops observer, canary dry run | `ci-observer.sh`; `release.sh canary --dry-run` |
-| workflow lint, docker | actionlint/shellcheck; context check, production image, PID 1 check |
+| workflow lint, docker | actionlint/shellcheck (also any other workflow the pull request changed); context check, production image, PID 1 check |
 
 It runs on `workflow_dispatch` (Actions → CI full), nightly at 04:23 UTC on the
 default branch, after pushes to `master` that change more than docs, and when

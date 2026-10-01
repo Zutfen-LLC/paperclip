@@ -95,7 +95,9 @@ test("ci.yml: lanes other than policy and classify are gated on the plan", () =>
 test("ci.yml: verify runs hosted, without a checkout, and fails closed", () => {
   const verify = jobsOf(workflows["ci.yml"]).verify;
   assert.match(verify.text, /runs-on: ubuntu-latest/);
-  assert.match(verify.text, /if: always\(\)/);
+  // Not always(): a superseded run is cancelled and must not report a failure.
+  assert.match(verify.text, /if: \$\{\{ !cancelled\(\) \}\}/);
+  assert.doesNotMatch(verify.text, /always\(\)\s*$/m);
   assert.match(verify.text, /permissions: \{\}/);
   assert.doesNotMatch(verify.text, /actions\/checkout/);
   assert.doesNotMatch(verify.text, /^ {4}runs-on: .*self-hosted/m);
@@ -140,6 +142,10 @@ test("ci-full.yml keeps the full upstream-equivalent inventory", () => {
     "docker-context-checks.Dockerfile",
     "ci-lint.sh",
     "check-pr-migration-order.mjs",
+    "test:e2e:runner:typecheck",
+    "test:runner-acceptance:typecheck",
+    "test:lifecycle-baseline:typecheck",
+    "check:token-gates",
   ]) {
     assert.ok(text.includes(required), `ci-full.yml must still run: ${required}`);
   }
