@@ -75,6 +75,8 @@ cache="${PAPERCLIP_CI_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/paperclip-ci}"
 runner_target="$cache/runner-target-$target_cache"
 mkdir -p "$cache/pnpm-store" "$cache/cargo" "$runner_target"
 
+# Single-quoted on purpose: the container shell expands $HOME, not this one.
+# shellcheck disable=SC2016
 script='mkdir -p "$HOME"'
 if [ "$install" -eq 1 ]; then
   script+=$'\n.github/scripts/ci-install.sh'

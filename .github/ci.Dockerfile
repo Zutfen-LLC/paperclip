@@ -1,4 +1,5 @@
-# Toolchain image for the self-hosted CI lanes (.github/workflows/ci.yml).
+# Toolchain image for the self-hosted CI lanes (.github/workflows/ci.yml and
+# ci-full.yml).
 #
 # The runner host is orchestration only: it needs Git and Docker, never Node,
 # pnpm or Rust. Everything repository-controlled runs inside this image via
@@ -45,6 +46,22 @@ RUN set -eux; \
     rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt; \
     rustup default "$RUST_TOOLCHAIN"; \
     chmod -R a+rX "$RUSTUP_HOME" "$CARGO_HOME"
+
+# Linters for the CI files (.github/scripts/ci-lint.sh). Added after the Rust
+# layers so a host that already holds them rebuilds only these. actionlint is
+# a version-pinned, checksum-verified release binary; shellcheck is the Debian
+# package, which actionlint also runs over inline workflow scripts.
+ARG ACTIONLINT_VERSION=1.7.12
+ARG ACTIONLINT_SHA256_AMD64=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends shellcheck; \
+    rm -rf /var/lib/apt/lists/*; \
+    curl -fsSLo /tmp/actionlint.tgz "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"; \
+    echo "${ACTIONLINT_SHA256_AMD64}  /tmp/actionlint.tgz" | sha256sum -c -; \
+    tar -xzf /tmp/actionlint.tgz -C /usr/local/bin actionlint; \
+    rm /tmp/actionlint.tgz; \
+    actionlint -version
 
 ENV CI=true \
     CARGO_INCREMENTAL=0 \
