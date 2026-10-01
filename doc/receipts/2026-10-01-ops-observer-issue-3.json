@@ -1,0 +1,206 @@
+{
+  "receipt_schema": "paperclip_ops_rollout_stop_v1",
+  "issue": 3,
+  "blocker_issue": 4,
+  "result": "BLOCKED_SECRET_REF_SCHEMA",
+  "production_certified": false,
+  "observed_at": "2026-10-01T12:27:46.951652+00:00",
+  "canonical_base_sha": "2ec4bb3d7e79684d0059cd61d056a82397a469bf",
+  "paperclip": {
+    "host": "paperclip-poc",
+    "container_id": 152,
+    "proxmox_host": "pm04",
+    "board_origin": "http://10.0.0.34:3100",
+    "deployed_sha": "d8c98d798ba007631efa92e6c984182449bc5f2b",
+    "previous_sha": "6a6e609a78f76b6b93805e610355981878bc0a50",
+    "archive_sha256": "a2476237fb396f179d6e5989a0dadf32ec5eb604435ce257df152173f025d57c",
+    "pending_migrations": 0,
+    "plugin_status": "disabled",
+    "plugin_dist_hashes": "6904b850744611c07b7c6d90bdba191019d8edbc3c13658a9820bb85c53fc059  /home/paperclip/plugin-releases/d8c98d798ba007631efa92e6c984182449bc5f2b/plugin-ops-observer/dist/worker.js\n1c91015ac54b222ad8038b0d6e4b9d493ef5476e6ba7e0466516995e06b37159  /home/paperclip/plugin-releases/d8c98d798ba007631efa92e6c984182449bc5f2b/plugin-ops-observer/dist/manifest.js\n9991da04bd9d4fb1d3d09e015d8c9497913863dc9b71aa5db03bf4531de02de8  /home/paperclip/plugin-releases/d8c98d798ba007631efa92e6c984182449bc5f2b/plugin-ops-observer/dist/ui/index.js"
+  },
+  "ops": {
+    "host": "hermes",
+    "api_scheduler_sha": "d7ce4b1ea238613c78fd8c7fc39573e1ad8982c4",
+    "identity_basis": [
+      "PID cwd and units",
+      "checkout reflog predates process starts",
+      "tracked Python source matches HEAD",
+      "newest source mtime predates starts",
+      "PID/start/restart identities unchanged"
+    ],
+    "adapter_merge_sha": "9d02dc2cb35addd77e88044b2fc50518bff1b51c",
+    "adapter_reviewed_sha": "e10299e5da8b9d48a88451c44a3b12604dce83a3",
+    "adapter_source_sha256": "1cebf8d9675e0955ceefc9400de06a9160b1d1029832f6f6c310a47878531d1f",
+    "configured_ops_sha": "d7ce4b1ea238613c78fd8c7fc39573e1ad8982c4",
+    "previous_configured_ops_sha": "1ec7f2c5a01305d3d0f8a14b7a97cb2c6a69906c"
+  },
+  "transport": {
+    "pinned_origin": "http://127.0.0.1:18487",
+    "tunnel": "CT152 127.0.0.1:18487 -> SSH zutfen@10.0.0.31 -> 127.0.0.1:8487",
+    "changed": false,
+    "paperclip_on_hermes": false
+  },
+  "secret_migration": {
+    "status": "blocked",
+    "http_status": 400,
+    "error": {
+      "error": "Configuration does not match the plugin's instanceConfigSchema",
+      "fieldErrors": [
+        {
+          "field": "/adapterToken",
+          "message": "must be string"
+        }
+      ]
+    },
+    "stored_config_changed": false,
+    "plaintext_compatibility_certified": false,
+    "created_secret_provider": "local_encrypted",
+    "created_secret_status": "disabled",
+    "configPath_required": "adapterToken",
+    "live_resolution": "not reached"
+  },
+  "ops_fingerprints": {
+    "query": "SELECT * FROM <table> ORDER BY rowid in consistent read-only SQLite transaction",
+    "digest_encoding": "sha256(json.dumps(rows,sort_keys=True,default=str,separators=(comma,colon)))",
+    "before": {
+      "tasks": {
+        "count": 27,
+        "sha256": "33e091b22cd24368940362aedf2f7cf289ec72c8f1c5e75fb1b37c6860c218f3"
+      },
+      "events": {
+        "count": 1556,
+        "sha256": "f1b520a9338d0db6e61fc07ac13ba3394b14af30a9f04153565472d318d7eb58"
+      },
+      "runs": {
+        "count": 161,
+        "sha256": "b1e7aff2781086be5667490e9d97601b9b125d6d4955797c41fe6b5e2d0dc4d4"
+      }
+    },
+    "after": {
+      "tasks": {
+        "count": 27,
+        "sha256": "33e091b22cd24368940362aedf2f7cf289ec72c8f1c5e75fb1b37c6860c218f3"
+      },
+      "events": {
+        "count": 1556,
+        "sha256": "f1b520a9338d0db6e61fc07ac13ba3394b14af30a9f04153565472d318d7eb58"
+      },
+      "runs": {
+        "count": 161,
+        "sha256": "b1e7aff2781086be5667490e9d97601b9b125d6d4955797c41fe6b5e2d0dc4d4"
+      }
+    },
+    "equal": true,
+    "scope": "Deployment/migration-attempt interval, NOT production certification read window"
+  },
+  "paperclip_neutrality": {
+    "issue_count_before": 16,
+    "issue_count_after": 16,
+    "issue_identities_unchanged": true,
+    "new_issue_mirrors": 0,
+    "stored_plugin_config_unchanged": true
+  },
+  "service_before": {
+    "ops-supervisor-api.service": {
+      "MainPID": "3135333",
+      "NRestarts": "0",
+      "ExecMainStartTimestamp": "Wed 2026-09-30 00:32:00 EDT",
+      "ExecMainStartTimestampMonotonic": "43729793707",
+      "WorkingDirectory": "/home/zutfen/ops-v2/ops-supervisor-v2"
+    },
+    "ops-supervisor-scheduler.service": {
+      "MainPID": "3135334",
+      "NRestarts": "0",
+      "ExecMainStartTimestamp": "Wed 2026-09-30 00:32:00 EDT",
+      "ExecMainStartTimestampMonotonic": "43729796026",
+      "WorkingDirectory": "/home/zutfen/ops-v2/ops-supervisor-v2"
+    },
+    "ops-readonly-adapter.service": {
+      "MainPID": "3095125",
+      "NRestarts": "1",
+      "ExecMainStartTimestamp": "Wed 2026-09-30 00:18:48 EDT",
+      "ExecMainStartTimestampMonotonic": "42937526969",
+      "WorkingDirectory": "!/home/zutfen"
+    },
+    "tunnel": {
+      "MainPID": "35112",
+      "NRestarts": "0",
+      "ExecMainStartTimestamp": "Wed 2026-09-30 04:25:40 UTC",
+      "ExecMainStartTimestampMonotonic": "1650974375402",
+      "WorkingDirectory": ""
+    },
+    "paperclip": {
+      "MainPID": "29201",
+      "NRestarts": "0",
+      "ExecMainStartTimestamp": "Wed 2026-09-30 02:08:50 UTC",
+      "ExecMainStartTimestampMonotonic": "1642763821409",
+      "WorkingDirectory": "/home/paperclip/.paperclip/fork/releases/6a6e609a78f76b6b93805e610355981878bc0a50/release"
+    }
+  },
+  "service_after": {
+    "ops-supervisor-api.service": {
+      "MainPID": "3135333",
+      "NRestarts": "0",
+      "ExecMainStartTimestamp": "Wed 2026-09-30 00:32:00 EDT",
+      "ExecMainStartTimestampMonotonic": "43729793707",
+      "WorkingDirectory": "/home/zutfen/ops-v2/ops-supervisor-v2"
+    },
+    "ops-supervisor-scheduler.service": {
+      "MainPID": "3135334",
+      "NRestarts": "0",
+      "ExecMainStartTimestamp": "Wed 2026-09-30 00:32:00 EDT",
+      "ExecMainStartTimestampMonotonic": "43729796026",
+      "WorkingDirectory": "/home/zutfen/ops-v2/ops-supervisor-v2"
+    },
+    "ops-readonly-adapter.service": {
+      "MainPID": "2862867",
+      "NRestarts": "0",
+      "ExecMainStartTimestamp": "Thu 2026-10-01 08:25:36 EDT",
+      "ExecMainStartTimestampMonotonic": "158545328987",
+      "WorkingDirectory": "!/home/zutfen"
+    },
+    "tunnel": {
+      "MainPID": "35112",
+      "NRestarts": "0",
+      "ExecMainStartTimestamp": "Wed 2026-09-30 04:25:40 UTC",
+      "ExecMainStartTimestampMonotonic": "1650974375402",
+      "WorkingDirectory": ""
+    },
+    "paperclip": {
+      "MainPID": "115506",
+      "NRestarts": "0",
+      "ExecMainStartTimestamp": "Thu 2026-10-01 12:14:32 UTC",
+      "ExecMainStartTimestampMonotonic": "1765505754338",
+      "WorkingDirectory": "/home/paperclip/.paperclip/fork/releases/d8c98d798ba007631efa92e6c984182449bc5f2b/release"
+    }
+  },
+  "api_scheduler_tunnel_unchanged": true,
+  "verification": {
+    "workspace_typecheck": "pass",
+    "workspace_build": "pass",
+    "observer_tests_passed": 259,
+    "observer_typecheck": "pass",
+    "adapter_tests_passed": 27,
+    "adapter_subtests_passed": 48,
+    "missing_auth_liveness_status": 401,
+    "production_method_path_auth_matrix": "not run: secret-ref STOP gate",
+    "production_cache_ttl": "not run: secret-ref STOP gate",
+    "production_snapshot_provenance": "not run: secret-ref STOP gate",
+    "instrumented_upstream_request_count": 0,
+    "destination_order_redirect_tests": "existing 259-test worker suite only, not production certification",
+    "repo_wide_tests": "not run; no application source changes"
+  },
+  "rollback": {
+    "ct_stopped_backup": "/home/paperclip/.paperclip/fork/backups/issue-3-pre-cutover",
+    "instance_archive_sha256": "008c030936b744c60d95b561d4a19573bb13c638aa2bfc7aab71e02bfd516256",
+    "private_evidence_dir": "/home/zutfen/paperclip-poc/evidence/issue-3",
+    "previous_adapter_unit": "/home/zutfen/paperclip-poc/evidence/issue-3/previous-adapter-unit.txt",
+    "credentials_in_receipt": false
+  },
+  "limitations": [
+    "Rollout deployed; certification blocked.",
+    "Observer and newly created unused secret disabled.",
+    "Legacy raw token remains in unchanged stored config; not certified or published.",
+    "Resume only after #4 is reviewed, merged, deployed."
+  ]
+}
