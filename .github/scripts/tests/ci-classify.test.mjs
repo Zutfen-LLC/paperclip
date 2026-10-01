@@ -225,6 +225,17 @@ test("broad classes override everything else and zero the focused lanes", () => 
   }
 });
 
+test("a broad plan still runs the lanes the full inventory does not cover", () => {
+  const withCi = classifyChanges(["pnpm-lock.yaml", ".github/workflows/ci.yml"]);
+  assert.deepEqual(selected(withCi.lanes), ["ci_check", "ci_selftest", "full", "policy"]);
+  const withDocker = classifyChanges(["pnpm-lock.yaml", "docker/docker-compose.yml"]);
+  assert.deepEqual(selected(withDocker.lanes), ["docker", "full", "policy"]);
+  const withUpstreamWorkflow = classifyChanges(["pnpm-lock.yaml", ".github/workflows/pr.yml"]);
+  assert.deepEqual(selected(withUpstreamWorkflow.lanes), ["ci_check", "full", "policy"]);
+  // Extra steps belong to lanes the full inventory replaces.
+  assert.deepEqual(onSteps(withCi.steps), []);
+});
+
 test("CI-owned files select lint and self-test, upstream workflows select only lint", () => {
   assert.deepEqual(selected(classifyChanges([".github/workflows/ci.yml"]).lanes), ["ci_check", "ci_selftest", "policy"]);
   assert.deepEqual(selected(classifyChanges([".github/workflows/pr.yml"]).lanes), ["ci_check", "policy"]);

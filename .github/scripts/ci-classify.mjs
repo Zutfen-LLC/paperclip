@@ -194,9 +194,7 @@ export function classifyChanges(files) {
   const broad = broadReasons.length > 0;
 
   const flags = new Set();
-  if (!broad) {
-    for (const id of classes) for (const lane of CLASS_LANES[id] ?? []) flags.add(lane);
-  }
+  for (const id of classes) for (const lane of CLASS_LANES[id] ?? []) flags.add(lane);
   // The context-integrity build is cheap, so it runs as a policy-job step for
   // anything that can change the build context. The production image is slow,
   // so its lane runs only when something that shapes the image changed.
@@ -204,29 +202,36 @@ export function classifyChanges(files) {
   const contextTouching =
     classes.includes("docker") ||
     classes.some((id) => !["docs", "evals", "ci", "workflows", "observer"].includes(id));
-  if (dockerImage && !broad) flags.add("docker");
-  if (contextTouching && !broad) flags.add("docker_context");
+  if (dockerImage) flags.add("docker");
+  if (contextTouching) flags.add("docker_context");
+
+  // The broad tier runs the full inventory, which covers every focused lane
+  // and step except these: ci-full.yml has no CI self-test, builds the
+  // production image only outside pull requests, and lints only the
+  // fork-owned workflows. A broad plan keeps them when its diff selects them.
+  const uncoveredByFull = new Set(["docker", "ci_check", "ci_selftest"]);
+  const lane = (id) => flags.has(id) && (!broad || uncoveredByFull.has(id));
 
   const lanes = {
     policy: true,
-    static: flags.has("static"),
+    static: lane("static"),
     tests_server: false,
     tests_workspaces: false,
-    observer: flags.has("observer"),
-    runner_checks: flags.has("runner_checks"),
-    runner_vitest: flags.has("runner_vitest"),
-    docker: flags.has("docker"),
-    ci_check: flags.has("ci_check"),
-    ci_selftest: flags.has("ci_selftest"),
+    observer: lane("observer"),
+    runner_checks: lane("runner_checks"),
+    runner_vitest: lane("runner_vitest"),
+    docker: lane("docker"),
+    ci_check: lane("ci_check"),
+    ci_selftest: lane("ci_selftest"),
     full: broad,
   };
   const steps = {
-    release_registry: flags.has("release_registry"),
-    token_gates: flags.has("token_gates"),
-    e2e_typecheck: flags.has("e2e_typecheck"),
-    docker_context: flags.has("docker_context"),
+    release_registry: !broad && flags.has("release_registry"),
+    token_gates: !broad && flags.has("token_gates"),
+    e2e_typecheck: !broad && flags.has("e2e_typecheck"),
+    docker_context: !broad && flags.has("docker_context"),
   };
-  return { classes, byClass, broad, broadReasons, needsTests: flags.has("tests"), lanes, steps };
+  return { classes, byClass, broad, broadReasons, needsTests: !broad && flags.has("tests"), lanes, steps };
 }
 
 export function listChangedFiles({ base, head, cwd = process.cwd() }) {

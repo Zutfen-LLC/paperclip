@@ -80,6 +80,15 @@ test("a selection that cannot be bounded escalates to broad: only policy and ful
   assert.deepEqual(Object.values(plan.steps).filter(Boolean), []);
 });
 
+test("escalating a selection keeps the lanes the full inventory does not cover", () => {
+  const plan = buildPlan({
+    changes: [change("server/src/services/issues.ts"), change(".github/ci.Dockerfile"), change("docker/docker-compose.yml")],
+    selectPlan: () => selection({ broadReasons: ["server selection is 500 files"] }),
+  });
+  assert.equal(plan.broad, true);
+  assert.deepEqual(on(plan.lanes), ["ci_check", "ci_selftest", "docker", "full", "policy"]);
+});
+
 test("infra and unknown paths are broad without consulting the selector", () => {
   for (const file of ["pnpm-lock.yaml", "mystery/file.ts"]) {
     let called = false;

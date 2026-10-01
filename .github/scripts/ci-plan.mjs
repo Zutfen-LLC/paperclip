@@ -17,10 +17,12 @@ import { fileURLToPath } from "node:url";
 import { LANE_IDS, classifyChanges, listChangedFiles, writeGithubOutputs } from "./ci-classify.mjs";
 import { planFromGit } from "./ci-select-tests.mjs";
 
-// Everything but the policy lane is replaced by the full inventory when the
-// plan is broad: the full workflow already contains those jobs.
-function broadLanes() {
-  return Object.fromEntries(LANE_IDS.map((id) => [id, id === "policy" || id === "full"]));
+// A broad plan runs the whole inventory in ci-full.yml. Every focused lane is
+// off except the ones that inventory does not cover (see ci-classify.mjs).
+function broadLanes(lanes) {
+  return Object.fromEntries(
+    LANE_IDS.map((id) => [id, id === "policy" || id === "full" || (["docker", "ci_check", "ci_selftest"].includes(id) && lanes[id])]),
+  );
 }
 
 export function buildPlan({ changes, selectPlan = planFromGit }) {
@@ -43,7 +45,7 @@ export function buildPlan({ changes, selectPlan = planFromGit }) {
     }
   }
   if (broad) {
-    lanes = broadLanes();
+    lanes = broadLanes(lanes);
     steps = Object.fromEntries(Object.keys(steps).map((key) => [key, false]));
   }
   const shardCount = !broad && selection ? selection.server.shards : 0;

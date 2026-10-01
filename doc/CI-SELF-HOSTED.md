@@ -69,6 +69,11 @@ Two rules keep this conservative:
 - **Markdown inside a package is not docs.** The runner's drift checks and the
   Docker context read committed markdown there.
 
+A broad plan replaces the focused lanes with the full inventory, except three
+lanes `ci-full.yml` does not cover: `docker` (the pull request build of the
+production image), `ci_check` (lint of changed upstream workflows) and
+`ci_selftest`. Those still run when the diff selects them.
+
 The Docker context-integrity check (about 15 seconds) runs inside the `policy`
 job for any change that is not docs, evals, CI-only or observer-only.
 
