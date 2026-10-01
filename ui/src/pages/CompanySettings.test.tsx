@@ -117,9 +117,12 @@ async function flushReact() {
   });
 }
 
-async function waitForAssertion(assertion: () => void) {
+// Bounded by wall-clock time, not a tick count: on a loaded CI host, 20
+// zero-delay ticks can elapse before the form's queries and chunks settle.
+async function waitForAssertion(assertion: () => void, timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs;
   let lastError: unknown;
-  for (let i = 0; i < 20; i += 1) {
+  do {
     await flushReact();
     try {
       assertion();
@@ -127,7 +130,8 @@ async function waitForAssertion(assertion: () => void) {
     } catch (error) {
       lastError = error;
     }
-  }
+    await new Promise((resolve) => window.setTimeout(resolve, 10));
+  } while (Date.now() < deadline);
   throw lastError;
 }
 

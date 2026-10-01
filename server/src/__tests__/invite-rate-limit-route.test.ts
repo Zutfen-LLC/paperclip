@@ -91,7 +91,6 @@ describe("invite-token endpoint rate limiting", () => {
         details: { retryAfterSeconds: 60 },
       });
     },
-    20_000,
   );
 
   it(
@@ -106,7 +105,6 @@ describe("invite-token endpoint rate limiting", () => {
         .send({});
       expect(limited.status).toBe(429);
     },
-    20_000,
   );
 
   it(
@@ -127,6 +125,5 @@ describe("invite-token endpoint rate limiting", () => {
         .set("x-forwarded-for", "1.1.1.2");
       expect(spoofed.status).toBe(429);
     },
-    20_000,
   );
 });
