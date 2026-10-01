@@ -134,8 +134,10 @@ jobs:
     runs-on: [self-hosted, linux, x64]
     timeout-minutes: 30
     steps:
+      # Full history only for the script-test step, which selects by diff.
       - uses: actions/checkout@v7
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Typecheck
@@ -148,6 +150,13 @@ jobs:
       - name: Release registry tests
         if: fromJSON(needs.classify.outputs.steps).release_registry
         run: .github/scripts/ci-run.sh --no-install --target-cache runner -- pnpm run test:release-registry
+
+      - name: Script tests
+        if: fromJSON(needs.classify.outputs.steps).script_tests
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: .github/scripts/ci-run.sh --no-install --target-cache runner -e BASE_SHA -e HEAD_SHA -- 'node .github/scripts/ci-select-tests.mjs run --group scripts --base "$BASE_SHA" --head "$HEAD_SHA"'
 
       - name: UI token gates
         if: fromJSON(needs.classify.outputs.steps).token_gates
@@ -342,10 +351,12 @@ jobs:
   # self-hosted queue. A lane the plan selected must have succeeded; a lane the
   # plan skipped is fine. If `classify` itself did not succeed, or never ran
   # because the pull request came from a fork, nothing was validated and verify
-  # fails.
+  # fails. `!cancelled()` rather than `always()`: a run superseded by a newer
+  # push is cancelled, and its verify should not run and report a failure (nor
+  # hold the newer run in the concurrency group while it does).
   verify:
     name: verify
-    if: always()
+    if: ${{ !cancelled() }}
     needs: [classify, policy, static, tests_server, tests_workspaces, observer, runner_checks, runner_vitest, docker, ci_check, ci_selftest, full]
     runs-on: ubuntu-latest
     permissions: {}

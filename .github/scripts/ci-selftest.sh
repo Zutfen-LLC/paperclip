@@ -39,9 +39,17 @@ echo "== isolation: no host Docker socket, no GitHub credentials, not root"
 echo "== install path and one real suite"
 .github/scripts/ci-run.sh --target-cache selftest -- 'pnpm exec vitest run --project @paperclipai/skills-catalog'
 
-echo "== rust target cache is mounted writable and per cache name"
+echo "== rust target cache is mounted writable and separate per cache name"
 .github/scripts/ci-run.sh --no-install --target-cache selftest -- '
   target=packages/paperclip-runner/runner/target
   test -w "$target"
   touch "$target/.ci-selftest"
+'
+.github/scripts/ci-run.sh --no-install --target-cache selftest-other -- '
+  target=packages/paperclip-runner/runner/target
+  test -w "$target"
+  if [ -e "$target/.ci-selftest" ]; then
+    echo "target caches selftest and selftest-other share a directory" >&2
+    exit 1
+  fi
 '

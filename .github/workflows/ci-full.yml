@@ -136,7 +136,7 @@ jobs:
             command: pnpm --filter @paperclipai/paperclip-runner check:static && pnpm --filter @paperclipai/paperclip-runner check:runner
             target_cache: runner
           - name: typecheck + build
-            command: pnpm run typecheck:build-gaps && pnpm run test:release-registry && pnpm --filter @paperclipai/paperclip-runner build:issue-thread && pnpm build && pnpm check:token-gates
+            command: pnpm run typecheck:build-gaps && pnpm run test:release-registry && pnpm --filter @paperclipai/paperclip-runner build:issue-thread && pnpm build && pnpm check:token-gates && pnpm test:e2e:runner:typecheck && pnpm test:runner-acceptance:typecheck && pnpm test:lifecycle-baseline:typecheck
             target_cache: runner
           - name: ops observer
             command: .github/scripts/ci-observer.sh
@@ -165,10 +165,18 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          fetch-depth: 0
           persist-credentials: false
 
+      # Lints the fork-owned workflows always, and any other workflow file the
+      # pull request changed. Both are empty outside pull requests.
       - name: actionlint and shellcheck
-        run: .github/scripts/ci-run.sh --no-install -- .github/scripts/ci-lint.sh
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          .github/scripts/ci-run.sh --no-install -e BASE_SHA -e HEAD_SHA -- '.github/scripts/ci-lint.sh ${BASE_SHA:+"$BASE_SHA" "$HEAD_SHA"}'
+
 
   docker:
     name: docker
