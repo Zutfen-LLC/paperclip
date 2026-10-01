@@ -1,0 +1,216 @@
+name: CI full
+
+# The complete, upstream-equivalent validation inventory, on the same
+# self-hosted Docker runners and toolchain image as ci.yml. Ordinary pull
+# requests do not run it and `verify` does not wait on it, with one exception:
+# ci.yml calls it as a reusable workflow when its plan is broad (a change to
+# dependency or toolchain files, an unrecognised path, or more server code than
+# the bounded tier covers).
+#
+# It also runs:
+#   - nightly, on the default branch;
+#   - after every push to master;
+#   - on demand: Actions > CI full > Run workflow.
+#
+# Not included: the Playwright e2e and release-smoke suites, which need a
+# browser the toolchain image does not carry, and the Grok public-install
+# check, which starts its own Docker containers. See doc/CI-SELF-HOSTED.md.
+
+on:
+  workflow_call:
+    inputs:
+      skip_policy:
+        description: Skip the policy job (ci.yml already ran it).
+        type: boolean
+        default: false
+  workflow_dispatch:
+    inputs:
+      max_parallel:
+        description: Concurrent test jobs. The default leaves one runner free for pull requests.
+        type: string
+        default: "3"
+  schedule:
+    - cron: "23 4 * * *"
+  push:
+    branches: [master]
+    paths-ignore:
+      - "doc/**"
+      - "docs/**"
+      - "releases/**"
+      - "report/**"
+      - "screenshots/**"
+      - "*.md"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-full-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+# Same trust guard as ci.yml on every job: pull requests from forks never run
+# repository code on the self-hosted pool. Dispatch, schedule and push events
+# are repository events and always pass it.
+jobs:
+  policy:
+    name: policy
+    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && !(inputs.skip_policy == true)
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Repository policy checks
+        env:
+          # Empty outside pull requests, which skips the diff-based checks.
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          .github/scripts/ci-run.sh --no-install -e BASE_SHA -e HEAD_SHA -- '
+            pnpm check:node-version
+            node ./scripts/check-docker-deps-stage.mjs
+            node ./scripts/check-no-git-push.mjs
+            node --test ./scripts/check-no-git-push.test.mjs
+            pnpm check:module-boundaries
+            node --test ./scripts/check-module-boundaries.test.mjs
+            node --test ".github/scripts/tests/*.test.mjs"
+            node --test ./scripts/__tests__/run-vitest-stable-shard.test.mjs
+            node --test ./scripts/__tests__/e2e-shard.test.mjs
+            node --test ./scripts/__tests__/release-verify-workflow.test.mjs ./scripts/cloud-source-verification.test.mjs ./scripts/standard-image-contract.test.mjs
+            node --test ./scripts/__tests__/build-standalone-concurrency.test.mjs
+            node ./scripts/release-package-map.mjs check
+            if [ -n "${BASE_SHA:-}" ]; then
+              node .github/scripts/check-pr-migration-order.mjs "$BASE_SHA" "$HEAD_SHA"
+              mapfile -t changed_paths < <(git diff --name-only "$BASE_SHA...$HEAD_SHA")
+              PAPERCLIP_RELEASE_BOOTSTRAP_BASE_SHA="$BASE_SHA" \
+                node ./scripts/check-release-package-bootstrap.mjs "${changed_paths[@]}"
+            fi
+            pnpm install --resolution-only --ignore-scripts --no-frozen-lockfile
+          '
+
+  # One matrix, so one cap. The runner pool is small and shared with pull
+  # requests: max-parallel keeps a runner free for the ci.yml fast lane, and a
+  # shard count above the number of concurrent runners only adds setup cost.
+  #
+  # Shard counts come from the recorded durations in
+  # scripts/*-shard-durations.json and the observed self-hosted runs: the three
+  # general-server shards and three serialized shards balance at about 30 and
+  # 17 minutes, and the small lanes pack into the gaps. Jobs are listed
+  # longest first, so the pool is full early and the tail is the short jobs.
+  check:
+    name: ${{ matrix.name }}
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ fromJSON(inputs.max_parallel || '3') }}
+      matrix:
+        include:
+          - name: server (1/3)
+            command: pnpm test:run:general -- --group general-server-without-chat --shard-index 0 --shard-count 3
+          - name: server (2/3)
+            command: pnpm test:run:general -- --group general-server-without-chat --shard-index 1 --shard-count 3
+          - name: server (3/3)
+            command: pnpm test:run:general -- --group general-server-without-chat --shard-index 2 --shard-count 3
+          - name: chat
+            command: pnpm test:run:general -- --group general-chat
+          - name: serialized server (1/3)
+            command: pnpm test:run:serialized -- --shard-index 0 --shard-count 3
+          - name: serialized server (2/3)
+            command: pnpm test:run:serialized -- --shard-index 1 --shard-count 3
+          - name: serialized server (3/3)
+            command: pnpm test:run:serialized -- --shard-index 2 --shard-count 3
+          - name: workspaces
+            command: pnpm test:run:general -- --group general-workspaces-a && pnpm test:run:general -- --group general-workspaces-b
+          - name: runner vitest
+            command: pnpm --filter @paperclipai/paperclip-runner test:typescript:vitest
+            target_cache: runner
+          - name: runner checks
+            command: pnpm --filter @paperclipai/paperclip-runner check:static && pnpm --filter @paperclipai/paperclip-runner check:runner
+            target_cache: runner
+          - name: typecheck + build
+            command: pnpm run typecheck:build-gaps && pnpm run test:release-registry && pnpm --filter @paperclipai/paperclip-runner build:issue-thread && pnpm build && pnpm check:token-gates
+            target_cache: runner
+          - name: ops observer
+            command: .github/scripts/ci-observer.sh
+          - name: canary dry run
+            command: .github/scripts/ci-canary.sh
+            target_cache: runner
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # Runner lanes and test lanes keep separate Rust target caches; see
+      # --target-cache in ci-run.sh. Test lanes only ever build release
+      # binaries (native-codex-runner.integration.test.ts).
+      - name: ${{ matrix.name }}
+        env:
+          CI_COMMAND: ${{ matrix.command }}
+          TARGET_CACHE: ${{ matrix.target_cache || 'tests' }}
+        run: .github/scripts/ci-run.sh --target-cache "$TARGET_CACHE" -- "$CI_COMMAND"
+
+  lint:
+    name: workflow lint
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: actionlint and shellcheck
+        run: .github/scripts/ci-run.sh --no-install -- .github/scripts/ci-lint.sh
+
+  docker:
+    name: docker
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 60
+    env:
+      CONTEXT_IMAGE: paperclip-context-checks:${{ github.run_id }}-${{ github.run_attempt }}
+      PRODUCTION_IMAGE: paperclip-production:${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # Same .dockerignore semantics as the real image build: a change that
+      # strips a committed build input from the context fails here instead of
+      # in the image build.
+      - name: Docker context integrity
+        run: |
+          DOCKER_BUILDKIT=1 docker build \
+            --file .github/docker-context-checks.Dockerfile \
+            --tag "$CONTEXT_IMAGE" .
+
+      # The full production image (UI, server, Runner binary) is the slowest
+      # lane, so a pull request's broad tier skips it; ci.yml builds it for
+      # changes to the Dockerfile and its context. Plain `docker build` reuses
+      # layers in the persistent daemon's local cache; nothing is pushed.
+      - name: Build production image
+        if: github.event_name != 'pull_request'
+        run: |
+          # The Dockerfile installs with --frozen-lockfile; refresh a stale
+          # lockfile first, as the upstream image workflow does.
+          .github/scripts/ci-run.sh --no-install -- 'pnpm install --resolution-only --ignore-scripts --no-frozen-lockfile'
+          DOCKER_BUILDKIT=1 docker build \
+            --target production \
+            --build-arg "PAPERCLIP_BUILD_COMMIT=$GITHUB_SHA" \
+            --tag "$PRODUCTION_IMAGE" .
+
+      - name: Verify PID 1 reaps orphaned processes
+        if: github.event_name != 'pull_request'
+        run: docker run --rm -i "$PRODUCTION_IMAGE" sh -s < scripts/assert-orphan-reaping.sh
+
+      - name: Remove CI images
+        if: always()
+        run: docker image rm "$CONTEXT_IMAGE" "$PRODUCTION_IMAGE" || true
