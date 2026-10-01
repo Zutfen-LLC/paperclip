@@ -2412,9 +2412,14 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        assert_eq!(
-            transport.socket.read_timeout().unwrap(),
-            Some(RUNTIME_READ_TIMEOUT)
+        // Linux stores SO_RCVTIMEO in jiffies and rounds up, so the value read
+        // back can exceed the one set by less than one tick: 252ms for 250ms
+        // on a CONFIG_HZ=250 kernel. One tick is at most 10ms (HZ >= 100).
+        let read_timeout = transport.socket.read_timeout().unwrap().unwrap();
+        assert!(
+            read_timeout >= RUNTIME_READ_TIMEOUT
+                && read_timeout < RUNTIME_READ_TIMEOUT + Duration::from_millis(10),
+            "read timeout {read_timeout:?} is not the runtime read timeout {RUNTIME_READ_TIMEOUT:?}"
         );
         assert_eq!(welcome.connection.lease_id, "lease_1");
         assert_eq!(welcome.lease.unwrap().expose().unwrap(), "lease-secret");

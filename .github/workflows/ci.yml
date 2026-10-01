@@ -92,6 +92,7 @@ jobs:
             command: pnpm run typecheck:build-gaps && pnpm run test:release-registry
           - name: build
             command: pnpm --filter @paperclipai/paperclip-runner build:issue-thread && pnpm build
+            target_cache: runner
           - name: server (1/4)
             command: pnpm test:run:general -- --group general-server-without-chat --shard-index 0 --shard-count 4
           - name: server (2/4)
@@ -114,19 +115,26 @@ jobs:
             command: pnpm test:run:serialized -- --shard-index 2 --shard-count 3
           - name: runner static checks
             command: pnpm --filter @paperclipai/paperclip-runner check:static
+            target_cache: runner
           - name: runner rust
             command: pnpm --filter @paperclipai/paperclip-runner check:runner
+            target_cache: runner
           - name: runner vitest
             command: pnpm --filter @paperclipai/paperclip-runner test:typescript:vitest
+            target_cache: runner
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
+      # Runner lanes and test lanes keep separate Rust target caches; see
+      # --target-cache in ci-run.sh. Test lanes only ever build release
+      # binaries (native-codex-runner.integration.test.ts).
       - name: ${{ matrix.name }}
         env:
           CI_COMMAND: ${{ matrix.command }}
-        run: .github/scripts/ci-run.sh -- "$CI_COMMAND"
+          TARGET_CACHE: ${{ matrix.target_cache || 'tests' }}
+        run: .github/scripts/ci-run.sh --target-cache "$TARGET_CACHE" -- "$CI_COMMAND"
 
   docker:
     name: docker

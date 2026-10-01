@@ -2,7 +2,8 @@
 # Run a command in the CI toolchain image (.github/ci.Dockerfile) as the
 # invoking user, with the checkout bind-mounted in place.
 #
-#   .github/scripts/ci-run.sh [--no-install] [-e NAME[=VALUE]]... -- <command>
+#   .github/scripts/ci-run.sh [--no-install] [--target-cache NAME]
+#                             [-e NAME[=VALUE]]... -- <command>
 #
 # Dependencies are installed first (frozen lockfile) unless --no-install is
 # given. The host needs only Git and Docker; the same invocation works from a
@@ -13,25 +14,38 @@
 # Rust target directory. The target directory is mounted over the in-tree path
 # that scripts/stage-runner-binary.mjs hardcodes, so the checkout's clean step
 # cannot discard a warm build.
+#
+# --target-cache NAME (default "default") picks which target directory is
+# mounted. Lanes that build different Rust profiles must not share one: some
+# server tests run only when a debug paperclip-runnerd exists but then resolve
+# the release binary, so a debug build left behind by another lane turns a
+# test that ephemeral upstream runners skip into a failure.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$root"
 
 install=1
+target_cache=default
 env_args=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --no-install) install=0; shift ;;
+    --target-cache) target_cache="$2"; shift 2 ;;
     -e) env_args+=(--env "$2"); shift 2 ;;
     --) shift; break ;;
     *) break ;;
   esac
 done
 if [ $# -eq 0 ]; then
-  echo "usage: ci-run.sh [--no-install] [-e NAME[=VALUE]]... -- <command>" >&2
+  echo "usage: ci-run.sh [--no-install] [--target-cache NAME] [-e NAME[=VALUE]]... -- <command>" >&2
   exit 2
 fi
+case "$target_cache" in
+  ''|*[!A-Za-z0-9_-]*)
+    echo "--target-cache must be a non-empty name of letters, digits, '-' or '_'" >&2
+    exit 2 ;;
+esac
 
 pnpm_version="$(sed -nE 's/.*"packageManager": *"pnpm@([0-9.]+)[^"]*".*/\1/p' package.json)"
 rust_toolchain="$(sed -nE 's/^channel *= *"([^"]+)".*/\1/p' packages/paperclip-runner/rust-toolchain.toml)"
@@ -58,7 +72,8 @@ if ! docker image inspect "$image" >/dev/null 2>&1; then
 fi
 
 cache="${PAPERCLIP_CI_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/paperclip-ci}"
-mkdir -p "$cache/pnpm-store" "$cache/cargo" "$cache/runner-target"
+runner_target="$cache/runner-target-$target_cache"
+mkdir -p "$cache/pnpm-store" "$cache/cargo" "$runner_target"
 
 script='mkdir -p "$HOME"'
 if [ "$install" -eq 1 ]; then
@@ -76,7 +91,7 @@ exec docker run --rm --init \
   --volume "$root:$root" \
   --volume "$cache/pnpm-store:$cache/pnpm-store" \
   --volume "$cache/cargo:$cache/cargo" \
-  --volume "$cache/runner-target:$root/packages/paperclip-runner/runner/target" \
+  --volume "$runner_target:$root/packages/paperclip-runner/runner/target" \
   --workdir "$root" \
   "$image" \
   bash -euo pipefail -c "$script"

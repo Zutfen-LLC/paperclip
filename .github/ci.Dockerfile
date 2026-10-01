@@ -17,9 +17,13 @@ ARG RUSTUP_SHA256_AMD64=4acc9acc76d5079515b46346a485974457b5a79893cfb01112423c89
 
 RUN test -n "$PNPM_VERSION" && test -n "$RUST_TOOLCHAIN"
 
-# The full node image already ships git, gcc, make, python3 and curl.
+# The full node image already ships git, gcc, make, python3, curl and ps, but
+# not lsof. GitHub-hosted runners do, and the local service supervisor reads
+# port listener pids with it (server/src/services/local-service-supervisor.ts):
+# without it the runtime-service tests cannot tell their own listener from a
+# foreign one and fail with "could not bind allocated port".
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends jq ripgrep \
+  && apt-get install -y --no-install-recommends jq lsof ripgrep \
   && rm -rf /var/lib/apt/lists/*
 
 RUN npm install --global "pnpm@${PNPM_VERSION}"
