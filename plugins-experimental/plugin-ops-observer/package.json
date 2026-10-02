@@ -16,5 +16,8 @@
     "ui": "./dist/ui/"
   },
   "keywords": ["paperclip", "ops-supervisor", "observer", "read-only"],
-  "license": "MIT"
+  "license": "MIT",
+  "engines": {
+    "node": ">=24.11.0"
+  }
 }

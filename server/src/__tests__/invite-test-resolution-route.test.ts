@@ -1,6 +1,6 @@
 import express from "express";
 import request from "supertest";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 function createSelectChain(rows: unknown[]) {
   const query = {
@@ -75,6 +75,13 @@ async function createApp(
 }
 
 describe.sequential("GET /invites/:token/test-resolution", () => {
+  // The first import of the route modules transforms a large module graph,
+  // which can take most of a test's timeout on a slow host. Pay it here,
+  // under its own timeout, so createApp() hits the module cache.
+  beforeAll(async () => {
+    await Promise.all([import("../routes/access.js"), import("../middleware/index.js")]);
+  }, 120_000);
+
   beforeEach(() => {
     vi.clearAllMocks();
   });

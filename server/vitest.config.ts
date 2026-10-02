@@ -31,9 +31,10 @@ export default defineConfig({
     // the loaded serial shard (maxWorkers=1) that cost can cross vitest's
     // default 5s testTimeout and fail the first test, which also lets its
     // fire-and-forget wake leak into the next test. Give each test generous
-    // headroom; 15s is far above the observed module-load cost yet still
-    // catches a genuinely hung test well inside the 20 minute job limit.
-    testTimeout: 15000,
+    // headroom; 30s covers the module-load cost on the slower self-hosted CI
+    // hosts, where the first test crossed 15s, yet still catches a genuinely
+    // hung test well inside the job limit.
+    testTimeout: 30000,
     isolate: true,
     maxConcurrency: 1,
     maxWorkers: 1,
@@ -43,6 +44,6 @@ export default defineConfig({
       concurrent: false,
       hooks: "list",
     },
-    setupFiles: ["./src/__tests__/setup-supertest.ts"],
+    setupFiles: ["./src/__tests__/setup-supertest.ts", "./src/__tests__/setup-wait-for.ts"],
   },
 });

@@ -116,7 +116,12 @@ async function cleanupHeartbeatInvalidationFixture(db: ReturnType<typeof createD
       const isLateCommentRace =
         error instanceof Error &&
         error.message.includes("issue_comments_issue_id_issues_id_fk");
-      if (!isLateCommentRace || attempt === 9) {
+      // TRUNCATE takes AccessExclusiveLock, so a late heartbeat write holding
+      // row locks can deadlock with it (40P01); Postgres aborts one side.
+      const isDeadlock =
+        error instanceof Error &&
+        (error.cause as { code?: string } | undefined)?.code === "40P01";
+      if (!(isLateCommentRace || isDeadlock) || attempt === 9) {
         throw error;
       }
 
