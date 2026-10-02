@@ -2832,12 +2832,14 @@ function nextProbeFileName() {
 // so this wrapper leaves that entry untouched instead of removing it. This
 // covers a peer's replacement file, a peer's replacement directory, and a
 // peer's replacement symbolic link alike, because all three change the
-// identity this wrapper reads back. The identity check includes ctimeMs,
-// not only (dev, ino): a filesystem can hand this call's freed inode number
-// straight back out to a peer's very next create at the same path, so
-// (dev, ino) alone can match a path this call no longer owns; ctimeMs resets
-// on every create, so a peer's replacement carries a different one even when
-// the inode number repeats. Node's filesystem API has no call that removes a
+// identity this wrapper reads back. The identity check also reads back a
+// random nonce this wrapper wrote into its own probe file, not only
+// (dev, ino, ctimeMs): a filesystem such as ext4 hands this call's freed
+// inode number straight back out to a peer's very next create at the same
+// path, and a kernel without fine-grained timestamps stamps both creates
+// with the same coarse-clock ctime when they land in one tick, so the three
+// values together can still match a path this call no longer owns. A peer's
+// replacement never carries this call's nonce. Node's filesystem API has no call that removes a
 // path only when its identity still matches an earlier read as one atomic
 // step, so a gap remains between this wrapper's final identity read and the
 // removal call itself. A peer that wins this gap can put any entry at the
@@ -2848,6 +2850,32 @@ function nextProbeFileName() {
 // stays under dirPath. If the entry is a symbolic link, the removal call
 // removes the link itself instead of following it to a different target.
 // A non-recursive removal call also fails if the entry is a directory.
+// Reads the nonce back from the entry at probePath, or null when that entry
+// is not a regular file with this call's (dev, ino). O_NOFOLLOW keeps a
+// swapped-in symbolic link from being followed, and O_NONBLOCK keeps a
+// swapped-in FIFO from blocking the open.
+async function readOwnedProbeNonce(probePath, ownedIdentity) {
+  const readFlag =
+    typeof fsConstants.O_NOFOLLOW === "number"
+      ? fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK
+      : "r";
+  let handle;
+  try {
+    handle = await fs.open(probePath, readFlag);
+  } catch {
+    return null;
+  }
+  try {
+    const stats = await handle.stat();
+    if (!stats.isFile() || stats.dev !== ownedIdentity.dev || stats.ino !== ownedIdentity.ino) return null;
+    return await handle.readFile("utf8");
+  } catch {
+    return null;
+  } finally {
+    await handle.close().catch(() => undefined);
+  }
+}
+
 async function birthtimeSurvivesProbe(dirPath) {
   let before;
   try {
@@ -2867,10 +2895,13 @@ async function birthtimeSurvivesProbe(dirPath) {
   // the path in the gap between the create above and the stat: fstat has no
   // such gap, because a file descriptor keeps naming the inode it opened no
   // matter what a later swap does to the path.
+  const nonce = randomBytes(16).toString("hex");
   let ownedIdentity = null;
   try {
+    await handle.writeFile(nonce, "utf8");
     const createdStats = await handle.stat();
-    // ctimeMs guards against inode reuse; see the function comment above.
+    // ctimeMs and the nonce guard against inode reuse; see the function
+    // comment above.
     ownedIdentity = { dev: createdStats.dev, ino: createdStats.ino, ctimeMs: createdStats.ctimeMs };
   } catch {
     ownedIdentity = null;
@@ -2898,7 +2929,8 @@ async function birthtimeSurvivesProbe(dirPath) {
     currentStats !== null &&
     currentStats.dev === ownedIdentity.dev &&
     currentStats.ino === ownedIdentity.ino &&
-    currentStats.ctimeMs === ownedIdentity.ctimeMs;
+    currentStats.ctimeMs === ownedIdentity.ctimeMs &&
+    (await readOwnedProbeNonce(probePath, ownedIdentity)) === nonce;
   if (stillOwned) {
     await fs.rm(probePath, { force: true }).catch(() => undefined);
   }
@@ -3150,6 +3182,7 @@ try {
 function getProcessSessionRemoteStreamSource(): string {
   return `import { spawn } from "node:child_process";
 import { promises as fs, constants as fsConstants } from "node:fs";
+import { randomBytes } from "node:crypto";
 import path from "node:path";
 
 const sessionDir = process.env.PAPERCLIP_PROCESS_SESSION_DIR;
@@ -3233,6 +3266,7 @@ ${PROCESS_SESSION_STDIN_POLL_TAIL}`;
 function getProcessSessionRemoteEventFileSource(): string {
   return `import { spawn } from "node:child_process";
 import { promises as fs, constants as fsConstants } from "node:fs";
+import { randomBytes } from "node:crypto";
 import path from "node:path";
 
 const sessionDir = process.env.PAPERCLIP_PROCESS_SESSION_DIR;

@@ -996,7 +996,10 @@ describe("deterministic remote process-session wrapper shutdown (PAP-5316)", () 
   // own. This is the worst case for the wrapper (the swap always lands
   // before the wrapper's very last look at the path), so a wrapper that
   // still leaves the peer's entry untouched under this preload proves the
-  // fix for every less-adversarial timing too. It never runs unless a test
+  // fix for every less-adversarial timing too. The "file-reused-identity"
+  // mode also reports the replacement with the original's (dev, ino,
+  // ctimeMs), as ext4 inode reuse within one coarse-clock tick does on a
+  // kernel without fine-grained timestamps. It never runs unless a test
   // opts in, and it never touches this test file's own process.
   let probeSwapPreloadDir: string | null = null;
   afterAll(async () => {
@@ -1024,10 +1027,18 @@ describe("deterministic remote process-session wrapper shutdown (PAP-5316)", () 
             `  fs.promises.lstat = async (candidatePath, opts) => {`,
             `    if (!swapped && path.basename(String(candidatePath)) === expectedName) {`,
             `      swapped = true;`,
+            `      const original = fs.lstatSync(candidatePath);`,
             `      try { fs.unlinkSync(candidatePath); } catch {}`,
-            `      if (mode === "file") fs.writeFileSync(candidatePath, "peer-owned-content");`,
+            `      if (mode === "file" || mode === "file-reused-identity") fs.writeFileSync(candidatePath, "peer-owned-content");`,
             `      else if (mode === "dir") fs.mkdirSync(candidatePath);`,
             `      else if (mode === "symlink") fs.symlinkSync(symlinkTarget, candidatePath);`,
+            `      if (mode === "file-reused-identity") {`,
+            `        const stats = await originalLstat(candidatePath, opts);`,
+            `        stats.dev = original.dev;`,
+            `        stats.ino = original.ino;`,
+            `        stats.ctimeMs = original.ctimeMs;`,
+            `        return stats;`,
+            `      }`,
             `    }`,
             `    return originalLstat(candidatePath, opts);`,
             `  };`,
@@ -1112,7 +1123,7 @@ describe("deterministic remote process-session wrapper shutdown (PAP-5316)", () 
     // Makes the wrapper's own process observe a same-sandbox peer replacing
     // its birth-time probe file, through the preload above (PAP-5355). seq 1
     // is sessionDir's probe (the first one captureSessionIdentity() runs).
-    probeSwap?: { seq: 1 | 2; mode: "file" | "dir" | "symlink"; symlinkTarget?: string };
+    probeSwap?: { seq: 1 | 2; mode: "file" | "file-reused-identity" | "dir" | "symlink"; symlinkTarget?: string };
     // Makes the wrapper's own process observe an fstat() failure on the open
     // descriptor for its own birth-time probe file, through the preload above
     // (PAP-5374). seq 1 is sessionDir's probe (the first one
@@ -2317,6 +2328,27 @@ describe("deterministic remote process-session wrapper shutdown (PAP-5316)", () 
     // The wrapper's own cleanup call already ran (the preload only swaps the
     // path the moment the wrapper itself checks it). This delay proves that
     // run settled and nothing removes the peer's file afterward.
+    await delay(200);
+    expect(await readFile(probePath, "utf8")).toBe("peer-owned-content");
+  }, 60_000);
+
+  it("T22b leaves a peer's replacement file untouched even when it reuses the probe's inode and ctime", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-probe-swap-reused-"));
+    cleanupDirs.push(rootDir);
+    const pidFile = path.join(rootDir, "t22b-child.pid");
+    const childPath = path.join(rootDir, "t22b-child.mjs");
+    await writeFile(childPath, trackedChildSource(pidFile), "utf8");
+
+    const wrapper = await startWrapperProcess({
+      outputToStdout: false,
+      command: process.execPath,
+      args: [childPath],
+      probeSwap: { seq: 1, mode: "file-reused-identity" },
+    });
+    await waitForTrackedChildPid(pidFile);
+
+    const probePath = path.join(wrapper.sessionDir, `.paperclip-birthtime-probe-${wrapper.pid}-1`);
+    await waitForProbeSwap(wrapper, async () => (await readFile(probePath, "utf8").catch(() => null)) === "peer-owned-content");
     await delay(200);
     expect(await readFile(probePath, "utf8")).toBe("peer-owned-content");
   }, 60_000);
