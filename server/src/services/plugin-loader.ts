@@ -1863,6 +1863,7 @@ export function pluginLoader(
         packageName: discovered.packageName,
         version: discovered.version,
         manifest: newManifest,
+        packagePath: discovered.source === "local-filesystem" ? discovered.packagePath : undefined,
       });
 
       return {
