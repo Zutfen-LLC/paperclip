@@ -2257,6 +2257,27 @@ describe("deterministic remote process-session wrapper shutdown (PAP-5316)", () 
   // time: it swaps the path the instant the wrapper itself looks at it for
   // the last time before deciding whether to remove it.
 
+  // The probe-swap tests wait for the preload to replace the probe path. When
+  // that never happens the bare "Timed out waiting for condition" says nothing
+  // about why, so fail with what the wrapper did instead. The wait is longer
+  // than the other condition waits: it follows a real process start on CI hosts
+  // that have taken more than 10s here.
+  async function waitForProbeSwap(
+    wrapper: { sessionDir: string; stderrText: () => string; exitInfo: () => { code: number | null; signal: NodeJS.Signals | null } },
+    check: () => Promise<boolean>,
+  ): Promise<void> {
+    try {
+      await waitFor(check, 30_000);
+    } catch (error) {
+      const entries = await readdir(wrapper.sessionDir).catch((readError) => [`<unreadable: ${String(readError)}>`]);
+      throw new Error(
+        `${error instanceof Error ? error.message : String(error)} ` +
+          `wrapper exit=${JSON.stringify(wrapper.exitInfo())} stderr=${JSON.stringify(wrapper.stderrText())} ` +
+          `sessionDir entries=${JSON.stringify(entries)}`,
+      );
+    }
+  }
+
   it("T21 still removes its own probe file normally when no peer ever replaces it", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-probe-no-swap-"));
     cleanupDirs.push(rootDir);
@@ -2292,13 +2313,13 @@ describe("deterministic remote process-session wrapper shutdown (PAP-5316)", () 
     await waitForTrackedChildPid(pidFile);
 
     const probePath = path.join(wrapper.sessionDir, `.paperclip-birthtime-probe-${wrapper.pid}-1`);
-    await waitFor(async () => (await readFile(probePath, "utf8").catch(() => null)) === "peer-owned-content", 10_000);
+    await waitForProbeSwap(wrapper, async () => (await readFile(probePath, "utf8").catch(() => null)) === "peer-owned-content");
     // The wrapper's own cleanup call already ran (the preload only swaps the
     // path the moment the wrapper itself checks it). This delay proves that
     // run settled and nothing removes the peer's file afterward.
     await delay(200);
     expect(await readFile(probePath, "utf8")).toBe("peer-owned-content");
-  }, 30_000);
+  }, 60_000);
 
   it("T23 leaves a peer's replacement directory untouched instead of deleting it", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-probe-swap-dir-"));
@@ -2316,10 +2337,10 @@ describe("deterministic remote process-session wrapper shutdown (PAP-5316)", () 
     await waitForTrackedChildPid(pidFile);
 
     const probePath = path.join(wrapper.sessionDir, `.paperclip-birthtime-probe-${wrapper.pid}-1`);
-    await waitFor(async () => await lstat(probePath).then((stats) => stats.isDirectory()).catch(() => false), 10_000);
+    await waitForProbeSwap(wrapper, async () => await lstat(probePath).then((stats) => stats.isDirectory()).catch(() => false));
     await delay(200);
     expect((await lstat(probePath)).isDirectory()).toBe(true);
-  }, 30_000);
+  }, 60_000);
 
   it("T24 leaves a peer's replacement symbolic link and its target untouched instead of deleting or following it", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-probe-swap-symlink-"));
@@ -2341,12 +2362,12 @@ describe("deterministic remote process-session wrapper shutdown (PAP-5316)", () 
     await waitForTrackedChildPid(pidFile);
 
     const probePath = path.join(wrapper.sessionDir, `.paperclip-birthtime-probe-${wrapper.pid}-1`);
-    await waitFor(async () => await lstat(probePath).then((stats) => stats.isSymbolicLink()).catch(() => false), 10_000);
+    await waitForProbeSwap(wrapper, async () => await lstat(probePath).then((stats) => stats.isSymbolicLink()).catch(() => false));
     await delay(200);
     expect((await lstat(probePath)).isSymbolicLink()).toBe(true);
     expect(await readlink(probePath)).toBe(linkTarget);
     expect(await readFile(linkTarget, "utf8")).toBe(knownContent);
-  }, 30_000);
+  }, 60_000);
 
   it("T25 fails closed at capture when its own probe file's identity cannot be read, so no orphan wrapper or child ever starts polling", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-probe-fstat-failure-"));
