@@ -22,6 +22,7 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
+import { drainHeartbeatRunsToQuiescence } from "./helpers/drain-heartbeat-runs.js";
 import { companySkillService } from "../services/company-skills.ts";
 import { heartbeatService } from "../services/heartbeat.ts";
 import { instanceSettingsService } from "../services/instance-settings.ts";
@@ -111,6 +112,9 @@ describeEmbeddedPostgres("heartbeat runtime skill version pins", () => {
 
   afterEach(async () => {
     capturedRuns.length = 0;
+    // A run can still be flushing its writes after it reports a final status;
+    // the TRUNCATE below deadlocks against those writes.
+    await drainHeartbeatRunsToQuiescence(db, heartbeatService(db));
     await instanceSettingsService(db).updateExperimental({ enableBetaSkills: false });
     await new Promise((resolve) => setTimeout(resolve, 100));
     await db.execute(sql.raw(`
