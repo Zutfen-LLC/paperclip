@@ -122,7 +122,7 @@ describe("stdin file race (parent PAP-4037)", () => {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
-  async function waitFor(check: () => boolean | Promise<boolean>, timeoutMs = 4_000): Promise<void> {
+  async function waitFor(check: () => boolean | Promise<boolean>, timeoutMs = 10_000): Promise<void> {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       if (await check()) return;
@@ -636,7 +636,7 @@ describe("stdin file race (parent PAP-4037)", () => {
       peer?.destroy();
       await bridge?.stop();
     }
-  }, 15_000);
+  }, 30_000);
 
   it("stops after exhausted input retries even when failure logging stalls", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-stdin-log-stall-"));
@@ -692,7 +692,7 @@ describe("stdin file race (parent PAP-4037)", () => {
       peer?.destroy();
       await (stop ?? bridge?.stop());
     }
-  }, 15_000);
+  }, 30_000);
 
   // ---- Host atomic-write tests ------------------------------------------
 
@@ -996,7 +996,10 @@ describe("deterministic remote process-session wrapper shutdown (PAP-5316)", () 
   // own. This is the worst case for the wrapper (the swap always lands
   // before the wrapper's very last look at the path), so a wrapper that
   // still leaves the peer's entry untouched under this preload proves the
-  // fix for every less-adversarial timing too. It never runs unless a test
+  // fix for every less-adversarial timing too. The "file-reused-identity"
+  // mode also reports the replacement with the original's (dev, ino,
+  // ctimeMs), as ext4 inode reuse within one coarse-clock tick does on a
+  // kernel without fine-grained timestamps. It never runs unless a test
   // opts in, and it never touches this test file's own process.
   let probeSwapPreloadDir: string | null = null;
   afterAll(async () => {
@@ -1024,10 +1027,18 @@ describe("deterministic remote process-session wrapper shutdown (PAP-5316)", () 
             `  fs.promises.lstat = async (candidatePath, opts) => {`,
             `    if (!swapped && path.basename(String(candidatePath)) === expectedName) {`,
             `      swapped = true;`,
+            `      const original = fs.lstatSync(candidatePath);`,
             `      try { fs.unlinkSync(candidatePath); } catch {}`,
-            `      if (mode === "file") fs.writeFileSync(candidatePath, "peer-owned-content");`,
+            `      if (mode === "file" || mode === "file-reused-identity") fs.writeFileSync(candidatePath, "peer-owned-content");`,
             `      else if (mode === "dir") fs.mkdirSync(candidatePath);`,
             `      else if (mode === "symlink") fs.symlinkSync(symlinkTarget, candidatePath);`,
+            `      if (mode === "file-reused-identity") {`,
+            `        const stats = await originalLstat(candidatePath, opts);`,
+            `        stats.dev = original.dev;`,
+            `        stats.ino = original.ino;`,
+            `        stats.ctimeMs = original.ctimeMs;`,
+            `        return stats;`,
+            `      }`,
             `    }`,
             `    return originalLstat(candidatePath, opts);`,
             `  };`,
@@ -1112,7 +1123,7 @@ describe("deterministic remote process-session wrapper shutdown (PAP-5316)", () 
     // Makes the wrapper's own process observe a same-sandbox peer replacing
     // its birth-time probe file, through the preload above (PAP-5355). seq 1
     // is sessionDir's probe (the first one captureSessionIdentity() runs).
-    probeSwap?: { seq: 1 | 2; mode: "file" | "dir" | "symlink"; symlinkTarget?: string };
+    probeSwap?: { seq: 1 | 2; mode: "file" | "file-reused-identity" | "dir" | "symlink"; symlinkTarget?: string };
     // Makes the wrapper's own process observe an fstat() failure on the open
     // descriptor for its own birth-time probe file, through the preload above
     // (PAP-5374). seq 1 is sessionDir's probe (the first one
@@ -1320,7 +1331,7 @@ describe("deterministic remote process-session wrapper shutdown (PAP-5316)", () 
     await rm(wrapper.sessionDir, { recursive: true, force: true });
     await Promise.race([
       wrapper.exited,
-      delay(4_000).then(() => {
+      delay(10_000).then(() => {
         throw new Error("The wrapper did not exit after its session directory disappeared.");
       }),
     ]);
@@ -1342,17 +1353,17 @@ describe("deterministic remote process-session wrapper shutdown (PAP-5316)", () 
     const wrapperScriptSubstring = path.posix.join(rootDir, ".paperclip-runtime", "acpx", "process-sessions");
     try {
       expect(isPidAlive(session.pid)).toBe(true);
-      await waitFor(async () => (await findLivePidsByArgvSubstring(wrapperScriptSubstring)).length > 0, 4_000);
+      await waitFor(async () => (await findLivePidsByArgvSubstring(wrapperScriptSubstring)).length > 0, 10_000);
       await session.bridge.stop();
       // The child ignores SIGTERM, so `terminate()` needs its own grace
       // period (default 3s) before it escalates to SIGKILL.
       await waitFor(() => !isPidAlive(session.pid), 8_000);
       expect(isPidAlive(session.pid)).toBe(false);
-      await waitFor(async () => (await findLivePidsByArgvSubstring(wrapperScriptSubstring)).length === 0, 4_000);
+      await waitFor(async () => (await findLivePidsByArgvSubstring(wrapperScriptSubstring)).length === 0, 10_000);
     } finally {
       await session.bridge.stop().catch(() => undefined);
     }
-  }, 15_000);
+  }, 30_000);
 
   it("T3 exits on its own when the child exits first and no stdinEnd is ever sent", async () => {
     const wrapper = await startWrapperProcess({
@@ -1362,7 +1373,7 @@ describe("deterministic remote process-session wrapper shutdown (PAP-5316)", () 
     });
     await Promise.race([
       wrapper.exited,
-      delay(4_000).then(() => {
+      delay(10_000).then(() => {
         throw new Error("The wrapper did not exit on its own after its child exited.");
       }),
     ]);
@@ -1400,7 +1411,7 @@ describe("deterministic remote process-session wrapper shutdown (PAP-5316)", () 
       await sessionA.bridge.stop().catch(() => undefined);
       await sessionB.bridge.stop().catch(() => undefined);
     }
-  }, 15_000);
+  }, 30_000);
 
   it("T5 still writes both control messages, finishes fast, and warns never after a forged exit event the live poll reads early", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-forged-exit-"));
@@ -1470,7 +1481,7 @@ describe("deterministic remote process-session wrapper shutdown (PAP-5316)", () 
     // follows it.
     expect(elapsedMs).toBeLessThan(1_000);
     expect(warnedCount).toBe(0);
-  }, 10_000);
+  }, 30_000);
 
   it("T14 a forged exit event alone does not shorten the wait when the wrapper never truly runs", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-forged-only-"));
@@ -1565,7 +1576,7 @@ describe("deterministic remote process-session wrapper shutdown (PAP-5316)", () 
     expect(warnedCount).toBe(1);
     const removeScript = scripts.find((script) => script.trim().startsWith("rm -rf"));
     expect(removeScript).toBeDefined();
-  }, 10_000);
+  }, 30_000);
 
   it("T6 issues no operating-system signal from the host during stop()", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-no-signal-"));
@@ -1616,7 +1627,7 @@ describe("deterministic remote process-session wrapper shutdown (PAP-5316)", () 
     });
     await Promise.race([
       wrapper.exited,
-      delay(4_000).then(() => {
+      delay(10_000).then(() => {
         throw new Error("The wrapper did not exit after its child exited on its own.");
       }),
     ]);
@@ -1669,7 +1680,7 @@ describe("deterministic remote process-session wrapper shutdown (PAP-5316)", () 
 
     await Promise.race([
       exited,
-      delay(4_000).then(() => {
+      delay(10_000).then(() => {
         throw new Error("The wrapper did not exit after sessionDir was a symbolic link.");
       }),
     ]);
@@ -1687,7 +1698,7 @@ describe("deterministic remote process-session wrapper shutdown (PAP-5316)", () 
         "process.stdout.write(JSON.stringify(Object.keys(process.env).filter((k) => k.startsWith('PAPERCLIP_PROCESS_SESSION'))));process.exit(0)",
       ],
     });
-    await waitFor(() => wrapper.frames.some((frame) => frame.type === "exit"), 4_000);
+    await waitFor(() => wrapper.frames.some((frame) => frame.type === "exit"), 10_000);
     const text = wrapper.frames
       .filter((frame) => frame.type === "data" && frame.stream === "stdout" && typeof frame.data === "string")
       .map((frame) => Buffer.from(frame.data as string, "base64").toString("utf8"))
@@ -1782,7 +1793,7 @@ describe("deterministic remote process-session wrapper shutdown (PAP-5316)", () 
 
     expect(elapsedMs).toBeLessThan(1_000);
     expect(warnedCount).toBe(0);
-  }, 10_000);
+  }, 30_000);
 
   // Regression coverage for PAP-5323: a genuinely stuck wrapper, one that
   // never writes any event, must still warn after the budget and still
@@ -1864,7 +1875,7 @@ describe("deterministic remote process-session wrapper shutdown (PAP-5316)", () 
     expect(warnedCount).toBe(1);
     const removeScript = scripts.find((script) => script.trim().startsWith("rm -rf"));
     expect(removeScript).toBeDefined();
-  }, 10_000);
+  }, 30_000);
 
   // Regression coverage for PAP-5336: the finding this test reproduces is a
   // sandbox control-plane integrity failure, not a timing quirk. During
@@ -2015,7 +2026,7 @@ describe("deterministic remote process-session wrapper shutdown (PAP-5316)", () 
     const pid = Number.parseInt((await readFile(pidFile, "utf8")).trim(), 10);
     expect(isPidAlive(pid)).toBe(true);
     const wrapperScriptSubstring = path.posix.join(rootDir, ".paperclip-runtime", "acpx", "process-sessions");
-    await waitFor(async () => (await findLivePidsByArgvSubstring(wrapperScriptSubstring)).length > 0, 4_000);
+    await waitFor(async () => (await findLivePidsByArgvSubstring(wrapperScriptSubstring)).length > 0, 10_000);
 
     await bridge!.stop();
 
@@ -2033,7 +2044,7 @@ describe("deterministic remote process-session wrapper shutdown (PAP-5316)", () 
     await waitFor(() => !isPidAlive(pid), 8_000);
     expect(isPidAlive(pid)).toBe(false);
     await waitFor(async () => (await findLivePidsByArgvSubstring(wrapperScriptSubstring)).length === 0, 8_000);
-  }, 15_000);
+  }, 30_000);
 
   // ---- PAP-5338: reject a change-time creation-time substitute, and every
   // lstat error during verification -------------------------------------
@@ -2100,7 +2111,7 @@ describe("deterministic remote process-session wrapper shutdown (PAP-5316)", () 
     ]);
     expect(wrapper.exitInfo().code).toBe(0);
     expect(wrapper.stderrText()).not.toMatch(/not usable/);
-  }, 15_000);
+  }, 30_000);
 
   it("T17 fails closed at capture when the reported creation time follows the change time, so a change-time copy never passes as a real creation time", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-birthtime-followctime-"));
@@ -2124,7 +2135,7 @@ describe("deterministic remote process-session wrapper shutdown (PAP-5316)", () 
     ]);
     await expectNoLiveProcessByArgvSubstring(childPath);
     expect(wrapper.stderrText()).toMatch(/changed after a probe write/);
-  }, 15_000);
+  }, 30_000);
 
   it("T18 latches on an EACCES lstat failure on sessionDir during verification, not only on a removed directory", async () => {
     // sessionDir lives inside a parent this test owns, never the shared OS
@@ -2158,7 +2169,7 @@ describe("deterministic remote process-session wrapper shutdown (PAP-5316)", () 
       await chmod(parentDir, 0o700).catch(() => undefined);
     }
     expect(wrapper.stderrText()).toMatch(/Latching on a lost process session identity/);
-  }, 15_000);
+  }, 30_000);
 
   it("T19 latches on an EACCES lstat failure on stdinDir during verification, even though sessionDir itself still stats cleanly", async () => {
     const wrapperOptions = { outputToStdout: false as const, terminateGraceMs: 200 };
@@ -2182,7 +2193,7 @@ describe("deterministic remote process-session wrapper shutdown (PAP-5316)", () 
       await chmod(wrapper.sessionDir, 0o700).catch(() => undefined);
     }
     expect(wrapper.stderrText()).toMatch(/Latching on a lost process session identity/);
-  }, 15_000);
+  }, 30_000);
 
   it("T20 refuses to write through a probe path a sandbox peer pre-created as a symbolic link, and leaves that link and its target untouched", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-probe-symlink-race-"));
@@ -2247,7 +2258,7 @@ describe("deterministic remote process-session wrapper shutdown (PAP-5316)", () 
     expect(stderrText).toMatch(/could not be created exclusively/);
     expect((await lstat(probePath)).isSymbolicLink()).toBe(true);
     expect(await readFile(probeLinkTarget, "utf8")).toBe(knownContent);
-  }, 15_000);
+  }, 30_000);
 
   // ---- PAP-5355: identity-aware cleanup after a same-sandbox peer replaces
   // the probe file this wrapper just created, in the gap between this
@@ -2256,6 +2267,27 @@ describe("deterministic remote process-session wrapper shutdown (PAP-5316)", () 
   // timing for that gap deterministically, instead of racing real wall-clock
   // time: it swaps the path the instant the wrapper itself looks at it for
   // the last time before deciding whether to remove it.
+
+  // The probe-swap tests wait for the preload to replace the probe path. When
+  // that never happens the bare "Timed out waiting for condition" says nothing
+  // about why, so fail with what the wrapper did instead. The wait is longer
+  // than the other condition waits: it follows a real process start on CI hosts
+  // that have taken more than 10s here.
+  async function waitForProbeSwap(
+    wrapper: { sessionDir: string; stderrText: () => string; exitInfo: () => { code: number | null; signal: NodeJS.Signals | null } },
+    check: () => Promise<boolean>,
+  ): Promise<void> {
+    try {
+      await waitFor(check, 30_000);
+    } catch (error) {
+      const entries = await readdir(wrapper.sessionDir).catch((readError) => [`<unreadable: ${String(readError)}>`]);
+      throw new Error(
+        `${error instanceof Error ? error.message : String(error)} ` +
+          `wrapper exit=${JSON.stringify(wrapper.exitInfo())} stderr=${JSON.stringify(wrapper.stderrText())} ` +
+          `sessionDir entries=${JSON.stringify(entries)}`,
+      );
+    }
+  }
 
   it("T21 still removes its own probe file normally when no peer ever replaces it", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-probe-no-swap-"));
@@ -2272,9 +2304,9 @@ describe("deterministic remote process-session wrapper shutdown (PAP-5316)", () 
     await waitForTrackedChildPid(pidFile);
 
     const probePath = path.join(wrapper.sessionDir, `.paperclip-birthtime-probe-${wrapper.pid}-1`);
-    await waitFor(async () => !(await lstat(probePath).then(() => true).catch(() => false)), 4_000);
+    await waitFor(async () => !(await lstat(probePath).then(() => true).catch(() => false)), 10_000);
     await expect(lstat(probePath)).rejects.toThrow();
-  }, 15_000);
+  }, 30_000);
 
   it("T22 leaves a peer's replacement file untouched instead of deleting it", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-probe-swap-file-"));
@@ -2292,13 +2324,34 @@ describe("deterministic remote process-session wrapper shutdown (PAP-5316)", () 
     await waitForTrackedChildPid(pidFile);
 
     const probePath = path.join(wrapper.sessionDir, `.paperclip-birthtime-probe-${wrapper.pid}-1`);
-    await waitFor(async () => (await readFile(probePath, "utf8").catch(() => null)) === "peer-owned-content", 4_000);
+    await waitForProbeSwap(wrapper, async () => (await readFile(probePath, "utf8").catch(() => null)) === "peer-owned-content");
     // The wrapper's own cleanup call already ran (the preload only swaps the
     // path the moment the wrapper itself checks it). This delay proves that
     // run settled and nothing removes the peer's file afterward.
     await delay(200);
     expect(await readFile(probePath, "utf8")).toBe("peer-owned-content");
-  }, 15_000);
+  }, 60_000);
+
+  it("T22b leaves a peer's replacement file untouched even when it reuses the probe's inode and ctime", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-probe-swap-reused-"));
+    cleanupDirs.push(rootDir);
+    const pidFile = path.join(rootDir, "t22b-child.pid");
+    const childPath = path.join(rootDir, "t22b-child.mjs");
+    await writeFile(childPath, trackedChildSource(pidFile), "utf8");
+
+    const wrapper = await startWrapperProcess({
+      outputToStdout: false,
+      command: process.execPath,
+      args: [childPath],
+      probeSwap: { seq: 1, mode: "file-reused-identity" },
+    });
+    await waitForTrackedChildPid(pidFile);
+
+    const probePath = path.join(wrapper.sessionDir, `.paperclip-birthtime-probe-${wrapper.pid}-1`);
+    await waitForProbeSwap(wrapper, async () => (await readFile(probePath, "utf8").catch(() => null)) === "peer-owned-content");
+    await delay(200);
+    expect(await readFile(probePath, "utf8")).toBe("peer-owned-content");
+  }, 60_000);
 
   it("T23 leaves a peer's replacement directory untouched instead of deleting it", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-probe-swap-dir-"));
@@ -2316,10 +2369,10 @@ describe("deterministic remote process-session wrapper shutdown (PAP-5316)", () 
     await waitForTrackedChildPid(pidFile);
 
     const probePath = path.join(wrapper.sessionDir, `.paperclip-birthtime-probe-${wrapper.pid}-1`);
-    await waitFor(async () => await lstat(probePath).then((stats) => stats.isDirectory()).catch(() => false), 4_000);
+    await waitForProbeSwap(wrapper, async () => await lstat(probePath).then((stats) => stats.isDirectory()).catch(() => false));
     await delay(200);
     expect((await lstat(probePath)).isDirectory()).toBe(true);
-  }, 15_000);
+  }, 60_000);
 
   it("T24 leaves a peer's replacement symbolic link and its target untouched instead of deleting or following it", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-probe-swap-symlink-"));
@@ -2341,12 +2394,12 @@ describe("deterministic remote process-session wrapper shutdown (PAP-5316)", () 
     await waitForTrackedChildPid(pidFile);
 
     const probePath = path.join(wrapper.sessionDir, `.paperclip-birthtime-probe-${wrapper.pid}-1`);
-    await waitFor(async () => await lstat(probePath).then((stats) => stats.isSymbolicLink()).catch(() => false), 4_000);
+    await waitForProbeSwap(wrapper, async () => await lstat(probePath).then((stats) => stats.isSymbolicLink()).catch(() => false));
     await delay(200);
     expect((await lstat(probePath)).isSymbolicLink()).toBe(true);
     expect(await readlink(probePath)).toBe(linkTarget);
     expect(await readFile(linkTarget, "utf8")).toBe(knownContent);
-  }, 15_000);
+  }, 60_000);
 
   it("T25 fails closed at capture when its own probe file's identity cannot be read, so no orphan wrapper or child ever starts polling", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-probe-fstat-failure-"));
@@ -2377,5 +2430,5 @@ describe("deterministic remote process-session wrapper shutdown (PAP-5316)", () 
     // at the same path.
     const probePath = path.join(wrapper.sessionDir, `.paperclip-birthtime-probe-${wrapper.pid}-1`);
     expect((await lstat(probePath)).isFile()).toBe(true);
-  }, 15_000);
+  }, 30_000);
 });

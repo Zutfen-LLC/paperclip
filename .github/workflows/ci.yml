@@ -1,0 +1,402 @@
+name: CI
+
+# Fork-owned pull-request CI for self-hosted [self-hosted, linux, x64] runners.
+#
+# Pull requests run a risk-based subset: `classify` reads the diff, picks the
+# lanes that can be affected and, for vitest, the suites worth running (see
+# .github/scripts/ci-plan.mjs and doc/CI-SELF-HOSTED.md). A pull request that
+# touches dependency or toolchain files, an unrecognised path, or too much
+# server code for the bounded tier escalates to `full`, the whole inventory in
+# ci-full.yml. `verify` is the single required check: it fails if any selected
+# lane did not succeed and accepts lanes the plan skipped.
+#
+# The runner host is orchestration only: it needs Git and Docker, never Node,
+# pnpm or Rust. Every repository-controlled command runs inside the toolchain
+# image from .github/ci.Dockerfile through .github/scripts/ci-run.sh, which
+# also reproduces any lane locally:
+#
+#   .github/scripts/ci-run.sh -- pnpm run typecheck:build-gaps
+#
+# This replaces the upstream pr.yml -> pr-trusted.yml path, which routes to an
+# AWS RunsOn fleet keyed to the upstream repository ID and falls back to
+# GitHub-hosted runners elsewhere. Disable pr.yml in the repository's Actions
+# settings so pull requests do not run both (doc/CI-SELF-HOSTED.md).
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+# Trust rule. Every job that runs on the self-hosted pool carries the same
+# guard: pull requests from forks never run repository code there, because the
+# persistent Docker daemon and the host caches would be reachable from
+# untrusted code. `verify` is the one job without it. It runs on a GitHub-hosted
+# runner, executes no repository code and fails closed, so a fork pull request
+# shows a failed required check instead of a skipped one that reads as passing.
+jobs:
+  classify:
+    name: classify
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 10
+    outputs:
+      lanes: ${{ steps.plan.outputs.lanes }}
+      steps: ${{ steps.plan.outputs.steps }}
+      server_shards: ${{ steps.plan.outputs.server_shards }}
+    steps:
+      # Full history: the plan diffs the merge base of the pull request.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Plan lanes
+        id: plan
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # The container cannot reach the runner's output files, so the plan
+          # writes them into the checkout and this step forwards them.
+          .github/scripts/ci-run.sh --no-install -e BASE_SHA -e HEAD_SHA -- \
+            'node .github/scripts/ci-plan.mjs --base "$BASE_SHA" --head "$HEAD_SHA" --outputs-file .ci-plan-outputs --summary-file .ci-plan-summary.md'
+          cat .ci-plan-outputs >> "$GITHUB_OUTPUT"
+          cat .ci-plan-summary.md >> "$GITHUB_STEP_SUMMARY"
+
+  policy:
+    name: policy
+    needs: [classify]
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 15
+    env:
+      CONTEXT_IMAGE: paperclip-context-checks:${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Repository policy checks
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          .github/scripts/ci-run.sh --no-install -e BASE_SHA -e HEAD_SHA -- '
+            pnpm check:node-version
+            node ./scripts/check-docker-deps-stage.mjs
+            node ./scripts/check-no-git-push.mjs
+            node --test ./scripts/check-no-git-push.test.mjs
+            pnpm check:module-boundaries
+            node --test ./scripts/check-module-boundaries.test.mjs
+            node --test ".github/scripts/tests/*.test.mjs"
+            node --test ./scripts/__tests__/run-vitest-stable-shard.test.mjs
+            node --test ./scripts/__tests__/e2e-shard.test.mjs
+            node --test ./scripts/__tests__/release-verify-workflow.test.mjs ./scripts/cloud-source-verification.test.mjs ./scripts/standard-image-contract.test.mjs
+            node --test ./scripts/__tests__/build-standalone-concurrency.test.mjs
+            node ./scripts/release-package-map.mjs check
+            node .github/scripts/check-pr-migration-order.mjs "$BASE_SHA" "$HEAD_SHA"
+            mapfile -t changed_paths < <(git diff --name-only "$BASE_SHA...$HEAD_SHA")
+            PAPERCLIP_RELEASE_BOOTSTRAP_BASE_SHA="$BASE_SHA" \
+              node ./scripts/check-release-package-bootstrap.mjs "${changed_paths[@]}"
+            pnpm install --resolution-only --ignore-scripts --no-frozen-lockfile
+          '
+
+      # Same .dockerignore semantics as the real image build: a change that
+      # strips a committed build input from the context fails here instead of
+      # in the image build. Cheap, so it rides along with policy.
+      - name: Docker context integrity
+        if: fromJSON(needs.classify.outputs.steps).docker_context
+        run: |
+          DOCKER_BUILDKIT=1 docker build \
+            --file .github/docker-context-checks.Dockerfile \
+            --tag "$CONTEXT_IMAGE" .
+
+      - name: Remove context image
+        if: always() && fromJSON(needs.classify.outputs.steps).docker_context
+        run: docker image rm "$CONTEXT_IMAGE" || true
+
+  # Typecheck and build, in one job so the checkout, image and dependency
+  # install are paid once. Both build the Runner release binary, so they share
+  # the `runner` Rust target cache with the runner lanes (see ci-run.sh).
+  static:
+    name: typecheck + build
+    needs: [classify]
+    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(needs.classify.outputs.lanes).static
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 30
+    steps:
+      # Full history only for the script-test step, which selects by diff.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Typecheck
+        run: .github/scripts/ci-run.sh --target-cache runner -- pnpm run typecheck:build-gaps
+
+      # Later steps reuse the checkout's node_modules from the first step.
+      - name: Build
+        run: .github/scripts/ci-run.sh --no-install --target-cache runner -- 'pnpm --filter @paperclipai/paperclip-runner build:issue-thread && pnpm build'
+
+      - name: Release registry tests
+        if: fromJSON(needs.classify.outputs.steps).release_registry
+        run: .github/scripts/ci-run.sh --no-install --target-cache runner -- pnpm run test:release-registry
+
+      - name: Script tests
+        if: fromJSON(needs.classify.outputs.steps).script_tests
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: .github/scripts/ci-run.sh --no-install --target-cache runner -e BASE_SHA -e HEAD_SHA -- 'node .github/scripts/ci-select-tests.mjs run --group scripts --base "$BASE_SHA" --head "$HEAD_SHA"'
+
+      - name: UI token gates
+        if: fromJSON(needs.classify.outputs.steps).token_gates
+        run: .github/scripts/ci-run.sh --no-install --target-cache runner -- pnpm check:token-gates
+
+      - name: Test-suite typechecks
+        if: fromJSON(needs.classify.outputs.steps).e2e_typecheck
+        run: .github/scripts/ci-run.sh --no-install --target-cache runner -- 'pnpm test:e2e:runner:typecheck && pnpm test:runner-acceptance:typecheck && pnpm test:lifecycle-baseline:typecheck'
+
+  # The selected server suites, split by recorded duration into as many shards
+  # as the selection needs (one to three; see ci-select-tests.mjs). Every shard
+  # recomputes the same selection from the same diff.
+  tests_server:
+    name: server tests (${{ matrix.shard }}/${{ strategy.job-total }})
+    needs: [classify]
+    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(needs.classify.outputs.lanes).tests_server
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.classify.outputs.server_shards) }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Test lanes keep their own Rust target cache; see --target-cache in
+      # ci-run.sh. They only ever build release binaries.
+      - name: Selected server suites
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          SHARD: ${{ matrix.shard }}/${{ strategy.job-total }}
+        run: |
+          .github/scripts/ci-run.sh --target-cache tests -e BASE_SHA -e HEAD_SHA -e SHARD -- '
+            pnpm run preflight:workspace-links
+            pnpm --filter @paperclipai/plugin-sdk ensure-build-deps
+            node .github/scripts/ci-select-tests.mjs run --group server --shard "$SHARD" --base "$BASE_SHA" --head "$HEAD_SHA"
+          '
+
+  # Whole small projects the change touches, plus the selected UI suites.
+  tests_workspaces:
+    name: workspace tests
+    needs: [classify]
+    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(needs.classify.outputs.lanes).tests_workspaces
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Selected workspace suites
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          .github/scripts/ci-run.sh --target-cache tests -e BASE_SHA -e HEAD_SHA -- '
+            pnpm run preflight:workspace-links
+            pnpm --filter @paperclipai/plugin-sdk ensure-build-deps
+            node .github/scripts/ci-select-tests.mjs run --group workspaces --base "$BASE_SHA" --head "$HEAD_SHA"
+          '
+
+  observer:
+    name: ops observer
+    needs: [classify]
+    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(needs.classify.outputs.lanes).observer
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Build, typecheck and test the observer
+        run: .github/scripts/ci-run.sh --target-cache tests -- .github/scripts/ci-observer.sh
+
+  runner_checks:
+    name: runner checks
+    needs: [classify]
+    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(needs.classify.outputs.lanes).runner_checks
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Runner static checks
+        run: .github/scripts/ci-run.sh --target-cache runner -- pnpm --filter @paperclipai/paperclip-runner check:static
+
+      - name: Runner Rust checks
+        run: .github/scripts/ci-run.sh --no-install --target-cache runner -- pnpm --filter @paperclipai/paperclip-runner check:runner
+
+  runner_vitest:
+    name: runner vitest
+    needs: [classify]
+    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(needs.classify.outputs.lanes).runner_vitest
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Runner vitest
+        run: .github/scripts/ci-run.sh --target-cache runner -- pnpm --filter @paperclipai/paperclip-runner test:typescript:vitest
+
+  # Production image build, for changes to the Dockerfile, its context or the
+  # compose files. Plain `docker build` reuses layers in the persistent
+  # daemon's cache; nothing is pushed.
+  docker:
+    name: docker image
+    needs: [classify]
+    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(needs.classify.outputs.lanes).docker
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 60
+    env:
+      PRODUCTION_IMAGE: paperclip-production:${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Build production image
+        run: |
+          # The Dockerfile installs with --frozen-lockfile; refresh a stale
+          # lockfile first, as the upstream image workflow does.
+          .github/scripts/ci-run.sh --no-install -- 'pnpm install --resolution-only --ignore-scripts --no-frozen-lockfile'
+          DOCKER_BUILDKIT=1 docker build \
+            --target production \
+            --build-arg "PAPERCLIP_BUILD_COMMIT=$GITHUB_SHA" \
+            --tag "$PRODUCTION_IMAGE" .
+
+      - name: Verify PID 1 reaps orphaned processes
+        run: docker run --rm -i "$PRODUCTION_IMAGE" sh -s < scripts/assert-orphan-reaping.sh
+
+      - name: Remove production image
+        if: always()
+        run: docker image rm "$PRODUCTION_IMAGE" || true
+
+  # Workflow files and CI shell scripts: actionlint and shellcheck.
+  ci_check:
+    name: workflow lint
+    needs: [classify]
+    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(needs.classify.outputs.lanes).ci_check
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: actionlint and shellcheck
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: .github/scripts/ci-run.sh --no-install -e BASE_SHA -e HEAD_SHA -- '.github/scripts/ci-lint.sh "$BASE_SHA" "$HEAD_SHA"'
+
+  # Representative execution of the CI plumbing itself, for changes to the CI
+  # workflows, scripts or toolchain image.
+  ci_selftest:
+    name: ci self-test
+    needs: [classify]
+    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(needs.classify.outputs.lanes).ci_selftest
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Exercise the toolchain image, caches and isolation
+        run: .github/scripts/ci-selftest.sh
+
+  # The broad tier: the whole upstream-equivalent inventory.
+  full:
+    name: full
+    needs: [classify]
+    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(needs.classify.outputs.lanes).full
+    uses: ./.github/workflows/ci-full.yml
+    with:
+      skip_policy: true
+
+  # Single required-check name that stays stable as lanes are added or split.
+  # Runs on a GitHub-hosted runner without a checkout: it only reads job
+  # results, so it executes no repository code and never waits behind the
+  # self-hosted queue. A lane the plan selected must have succeeded; a lane the
+  # plan skipped is fine. If `classify` itself did not succeed, or never ran
+  # because the pull request came from a fork, nothing was validated and verify
+  # fails. `!cancelled()` rather than `always()`: a run superseded by a newer
+  # push is cancelled, and its verify should not run and report a failure (nor
+  # hold the newer run in the concurrency group while it does).
+  verify:
+    name: verify
+    if: ${{ !cancelled() }}
+    needs: [classify, policy, static, tests_server, tests_workspaces, observer, runner_checks, runner_vitest, docker, ci_check, ci_selftest, full]
+    runs-on: ubuntu-latest
+    permissions: {}
+    timeout-minutes: 5
+    steps:
+      - name: Check selected lanes
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<< "$NEEDS_JSON"
+
+          classify_result="$(jq -r '.classify.result' <<< "$NEEDS_JSON")"
+          if [ "$classify_result" != success ]; then
+            echo "::error title=Not validated::classify did not succeed ($classify_result). Nothing ran; fork pull requests never run on the self-hosted pool."
+            exit 1
+          fi
+
+          lanes="$(jq -r '.classify.outputs.lanes' <<< "$NEEDS_JSON")"
+          if ! jq -e 'type == "object"' <<< "$lanes" > /dev/null 2>&1; then
+            echo "::error title=Not validated::classify produced no lane plan"
+            exit 1
+          fi
+
+          status=0
+          for lane in $(jq -r 'keys[]' <<< "$lanes"); do
+            selected="$(jq -r --arg lane "$lane" '.[$lane]' <<< "$lanes")"
+            result="$(jq -r --arg lane "$lane" '.[$lane].result // "missing"' <<< "$NEEDS_JSON")"
+            case "$selected:$result" in
+              true:success | false:skipped) ;;
+              *)
+                echo "::error title=Lane $lane::selected=$selected result=$result"
+                status=1
+                ;;
+            esac
+          done
+
+          # Whatever the plan said, a failed or cancelled job fails verify.
+          if jq -e '[.[].result] | any(. == "failure" or . == "cancelled")' <<< "$NEEDS_JSON" > /dev/null; then
+            echo "::error title=Failed job::at least one job failed or was cancelled"
+            status=1
+          fi
+          exit "$status"
