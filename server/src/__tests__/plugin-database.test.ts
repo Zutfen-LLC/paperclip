@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, mkdir, writeFile, readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { and, eq, sql } from "drizzle-orm";
@@ -190,7 +190,7 @@ describe("buildPluginWorkerEnv", () => {
 
   it("does not pass provider keys to non-environment plugins", () => {
     const env = buildPluginWorkerEnv({
-      manifest: { capabilities: ["ui.slots.register"] },
+      manifest: { capabilities: ["ui.slots.register"] as PaperclipPluginManifestV1["capabilities"] },
       instanceInfo,
       processEnv: {
         OPENAI_API_KEY: "openai-token",
@@ -456,6 +456,121 @@ describeEmbeddedPostgres("plugin database namespaces", () => {
       },
     };
   }
+
+  it("persists the resolved local package identity when upgrading a disabled plugin", async () => {
+    const oldManifest = manifest("paperclip.local-upgrade");
+    const newManifest: PaperclipPluginManifestV1 = { ...oldManifest, version: "2.0.0", description: "Upgraded local package B." };
+    const migrationNamespace = derivePluginDatabaseNamespace(oldManifest.id);
+    const packageA = await createInstallablePluginPackage(oldManifest, `CREATE TABLE ${migrationNamespace}.upgrade_a (id uuid PRIMARY KEY);`);
+    const packageB = await createInstallablePluginPackage(newManifest, `CREATE TABLE ${migrationNamespace}.upgrade_b (id uuid PRIMARY KEY);`);
+    await writeFile(path.join(packageA, "dist", "worker.js"), "export const artifact = 'A';\n", "utf8");
+    await writeFile(path.join(packageB, "dist", "worker.js"), "export const artifact = 'B';\n", "utf8");
+    const pluginId = await installPluginRecord(oldManifest);
+    await db.update(plugins).set({ packagePath: packageA, status: "disabled" }).where(eq(plugins.id, pluginId));
+    const workerManager = { startWorker: vi.fn().mockResolvedValue(undefined), stopAll: vi.fn().mockResolvedValue(undefined) };
+    const runtime = {
+      workerManager, eventBus: { forPlugin: vi.fn(() => ({})), subscriptionCount: vi.fn(() => 0) },
+      jobScheduler: { registerPlugin: vi.fn().mockResolvedValue(undefined), stop: vi.fn() },
+      jobStore: { syncJobDeclarations: vi.fn().mockResolvedValue(undefined) }, toolDispatcher: { registerPluginTools: vi.fn() },
+      lifecycleManager: { markError: vi.fn().mockResolvedValue(undefined) }, buildHostHandlers: vi.fn(() => ({})),
+      instanceInfo: { instanceId: "test-instance", hostVersion: "1.0.0", deploymentMode: "authenticated", deploymentExposure: "public" },
+    } as never;
+    const loader = pluginLoader(db, { enableLocalFilesystem: true, enableNpmDiscovery: false }, runtime);
+    const nonCanonicalPackageB = `${packageB}/../${path.basename(packageB)}`;
+
+    const result = await loader.upgradePlugin(pluginId, { localPath: nonCanonicalPackageB });
+    const [persisted] = await db.select().from(plugins).where(eq(plugins.id, pluginId));
+    expect(result.discovered.packagePath).toBe(path.resolve(packageB));
+    expect(result.discovered.packagePath).not.toBe(nonCanonicalPackageB);
+    expect(persisted).toMatchObject({
+      id: pluginId,
+      pluginKey: oldManifest.id,
+      version: newManifest.version,
+      manifestJson: newManifest,
+      packagePath: path.resolve(packageB),
+      status: "disabled",
+    });
+    const persistedPackageJson = JSON.parse(
+      await readFile(path.join(persisted!.packagePath!, "package.json"), "utf8"),
+    );
+    expect(persistedPackageJson).toMatchObject({ name: newManifest.id, version: newManifest.version });
+    expect(await readFile(path.join(persisted!.packagePath!, "manifest.js"), "utf8")).toContain(newManifest.description!);
+    expect(await readFile(path.join(persisted!.packagePath!, "dist", "worker.js"), "utf8")).toContain("artifact = 'B'");
+    expect(await readFile(path.join(packageA, "dist", "worker.js"), "utf8")).toContain("artifact = 'A'");
+    expect(workerManager.startWorker).not.toHaveBeenCalled();
+    await expect(loader.loadSingle(pluginId)).rejects.toThrow(/status 'disabled'/);
+    expect(workerManager.startWorker).not.toHaveBeenCalled();
+    expect((runtime as unknown as { toolDispatcher: { registerPluginTools: ReturnType<typeof vi.fn> } }).toolDispatcher.registerPluginTools).not.toHaveBeenCalled();
+
+    await db.update(plugins).set({ status: "ready" }).where(eq(plugins.id, pluginId));
+    const loadPluginId = pluginId;
+    const loadResult = await loader.loadSingle(loadPluginId);
+    expect(loadResult.success).toBe(true);
+    expect(workerManager.startWorker).toHaveBeenCalledWith(loadPluginId, expect.objectContaining({
+      entrypointPath: path.join(packageB, "dist", "worker.js"),
+      manifest: expect.objectContaining({ version: newManifest.version }),
+    }));
+    await db.update(plugins).set({ status: "disabled" }).where(eq(plugins.id, pluginId));
+  });
+
+  it.each([
+    ["validation failure", (old: PaperclipPluginManifestV1) => ({ ...old, version: "2.0.0", capabilities: ["ui.sidebar.register"] })],
+    ["manifest ID mismatch", (old: PaperclipPluginManifestV1) => ({ ...old, id: "paperclip.wrong-id", version: "2.0.0" })],
+    ["capability escalation", (old: PaperclipPluginManifestV1) => ({ ...old, version: "2.0.0", capabilities: [...old.capabilities, "issues.read"] })],
+  ])("leaves the full registry row unchanged after %s", async (_reason, makeManifest) => {
+    const oldManifest = manifest("paperclip.local-upgrade-failure");
+    const newManifest = makeManifest(oldManifest) as PaperclipPluginManifestV1;
+    const packageA = await createInstallablePluginPackage(oldManifest, "SELECT 1;");
+    const packageB = await createInstallablePluginPackage(newManifest, "SELECT 2;");
+    const pluginId = await installPluginRecord(oldManifest);
+    await db.update(plugins).set({ packagePath: packageA, status: "disabled" }).where(eq(plugins.id, pluginId));
+    const [before] = await db.select().from(plugins).where(eq(plugins.id, pluginId));
+    const loader = pluginLoader(db, { enableLocalFilesystem: true, enableNpmDiscovery: false });
+    const expectedError = {
+      "validation failure": /Invalid plugin manifest:/i,
+      "manifest ID mismatch": /new manifest ID .* does not match existing plugin ID/i,
+      "capability escalation": /introduces new capabilities that require approval/i,
+    }[_reason as "validation failure" | "manifest ID mismatch" | "capability escalation"];
+    await expect(loader.upgradePlugin(pluginId, { localPath: packageB })).rejects.toThrow(expectedError);
+    const [after] = await db.select().from(plugins).where(eq(plugins.id, pluginId));
+    expect(after).toEqual(before);
+  });
+
+  it("keeps npm upgrades package-manager sourced without persisting the temporary install path", async () => {
+    const oldManifest = manifest("paperclip.local-npm-upgrade");
+    const newManifest = { ...oldManifest, version: "2.0.0", description: "Npm package B." };
+    const pluginId = await installPluginRecord(oldManifest);
+    const installDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-plugin-npm-upgrade-"));
+    packageRoots.push(installDir);
+    const packageRoot = path.join(installDir, "node_modules", "paperclip.local-npm-upgrade");
+    const fakeNpmBin = await mkdtemp(path.join(os.tmpdir(), "paperclip-fake-npm-"));
+    packageRoots.push(fakeNpmBin);
+    const fakeNpm = path.join(fakeNpmBin, "npm");
+    const invocationReceipt = path.join(fakeNpmBin, "invocation.json");
+    await writeFile(fakeNpm, `#!${process.execPath}\nconst fs = require("node:fs/promises");\nconst path = require("node:path");\nconst args = process.argv.slice(2);\nconst prefixIndex = args.indexOf("--prefix");\nconst root = path.join(args[prefixIndex + 1], "node_modules", "paperclip.local-npm-upgrade");\nconst manifest = ${JSON.stringify(newManifest)};\n(async () => { await fs.writeFile(${JSON.stringify(invocationReceipt)}, JSON.stringify(args)); await fs.mkdir(path.join(root, "dist"), { recursive: true }); await fs.writeFile(path.join(root, "package.json"), JSON.stringify({ name: manifest.id, version: manifest.version, paperclipPlugin: { manifest: "./manifest.js" } })); await fs.writeFile(path.join(root, "manifest.js"), "export default " + JSON.stringify(manifest) + ";"); await fs.writeFile(path.join(root, "dist", "worker.js"), "export {};\\n"); })().catch((error) => { console.error(error); process.exitCode = 1; });\n`, { mode: 0o755 });
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${fakeNpmBin}:${originalPath ?? ""}`;
+    try {
+      const loader = pluginLoader(db, { localPluginDir: installDir, enableLocalFilesystem: false, enableNpmDiscovery: false });
+      const result = await loader.upgradePlugin(pluginId, { packageName: oldManifest.id, version: "2.0.0" });
+      expect(result.discovered.source).toBe("npm");
+      expect(result.discovered.packagePath).toBe(packageRoot);
+      expect(result.discovered.version).toBe(newManifest.version);
+      expect(result.discovered.manifest).toEqual(newManifest);
+      expect(JSON.parse(await readFile(invocationReceipt, "utf8"))).toEqual([
+        "install", `${oldManifest.id}@2.0.0`, "--prefix", installDir, "--save", "--ignore-scripts",
+      ]);
+      expect(JSON.parse(await readFile(path.join(packageRoot, "package.json"), "utf8"))).toMatchObject({
+        name: newManifest.id,
+        version: newManifest.version,
+      });
+      expect(await readFile(path.join(packageRoot, "manifest.js"), "utf8")).toContain(newManifest.description!);
+      const [persisted] = await db.select().from(plugins).where(eq(plugins.id, pluginId));
+      expect(persisted).toMatchObject({ packagePath: null, version: newManifest.version, manifestJson: newManifest, status: "installed" });
+    } finally {
+      process.env.PATH = originalPath;
+    }
+  });
 
   it("applies multi-file plugin migrations through the production validator", async () => {
     const pluginManifest = manifest(multiMigrationPluginKey);
