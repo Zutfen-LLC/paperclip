@@ -457,6 +457,35 @@ describeEmbeddedPostgres("plugin database namespaces", () => {
     };
   }
 
+  it("persists the discovered local package path when upgrading a disabled plugin", async () => {
+    const oldManifest = manifest("paperclip.local-upgrade");
+    const newManifest: PaperclipPluginManifestV1 = {
+      ...oldManifest,
+      version: "2.0.0",
+      description: "Upgraded local package B.",
+    };
+    const packageA = await createInstallablePluginPackage(oldManifest, "SELECT 1;");
+    const packageB = await createInstallablePluginPackage(newManifest, "SELECT 2;");
+    const pluginId = await installPluginRecord(oldManifest);
+    await db
+      .update(plugins)
+      .set({ packagePath: packageA, status: "disabled" })
+      .where(eq(plugins.id, pluginId));
+    const loader = pluginLoader(db, {
+      enableLocalFilesystem: true,
+      enableNpmDiscovery: false,
+    });
+
+    const result = await loader.upgradePlugin(pluginId, { localPath: packageB });
+    const [persisted] = await db.select().from(plugins).where(eq(plugins.id, pluginId));
+
+    expect(result.discovered.packagePath).toBe(path.resolve(packageB));
+    expect(persisted?.version).toBe(newManifest.version);
+    expect(persisted?.manifestJson).toEqual(newManifest);
+    expect(persisted?.packagePath).toBe(path.resolve(packageB));
+    expect(persisted?.status).toBe("disabled");
+  });
+
   it("applies multi-file plugin migrations through the production validator", async () => {
     const pluginManifest = manifest(multiMigrationPluginKey);
     const namespace = derivePluginDatabaseNamespace(pluginManifest.id);
