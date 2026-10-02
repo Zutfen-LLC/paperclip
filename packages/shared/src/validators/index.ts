@@ -646,6 +646,7 @@ export {
 export {
   envBindingPlainSchema,
   envBindingSecretRefSchema,
+  envBindingSecretRefJsonSchema,
   envBindingUserSecretRefSchema,
   envBindingSchema,
   envConfigSchema,

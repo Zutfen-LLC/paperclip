@@ -5,6 +5,16 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   resolve: {
     alias: [
+      // Server regressions import the standalone observer's source manifest.
+      // It has no workspace-installed SDK link, and the observer CI lane removes
+      // its temporary node_modules. Resolve the real built SDK independently of
+      // that lane's filesystem state (ensure-build-deps builds this entry).
+      {
+        find: /^@paperclipai\/plugin-sdk$/,
+        replacement: fileURLToPath(
+          new URL("../packages/plugins/sdk/dist/index.js", import.meta.url),
+        ),
+      },
       {
         find: /^@paperclipai\/paperclip-runner$/,
         replacement: fileURLToPath(

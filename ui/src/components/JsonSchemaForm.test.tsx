@@ -3,7 +3,7 @@
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { JsonSchemaForm, getDefaultValues } from "./JsonSchemaForm";
+import { JsonSchemaForm, getDefaultValues, validateField } from "./JsonSchemaForm";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -66,6 +66,55 @@ describe("JsonSchemaForm secret-ref rendering", () => {
     container.remove();
     document.body.innerHTML = "";
     vi.clearAllMocks();
+  });
+
+  it("does not offer raw input for object-only secret-reference fields", async () => {
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(<JsonSchemaForm
+        schema={{ type: "object", properties: { adapterToken: { type: "object", format: "secret-ref" } } }}
+        values={{ adapterToken: "old-plaintext" }} onChange={() => {}}
+      />);
+    });
+    expect(container.querySelector('[data-testid="secret-binding-picker"]')).not.toBeNull();
+    expect(container.querySelector('input[type="password"]')).toBeNull();
+    expect(container.textContent).not.toContain("paste a raw value");
+    await act(async () => { root.unmount(); });
+  });
+
+  it("writes and clears canonical object-only picker values", async () => {
+    const root = createRoot(container);
+    const onChange = vi.fn();
+    const schema = { type: "object", properties: { adapterToken: { type: "object", format: "secret-ref" } } };
+    await act(async () => {
+      root.render(<JsonSchemaForm schema={schema} values={{}} onChange={onChange} />);
+    });
+    const picker = container.querySelector<HTMLSelectElement>('[data-testid="secret-binding-picker"]')!;
+    await act(async () => {
+      picker.value = "11111111-1111-4111-8111-111111111111";
+      picker.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    const binding = { type: "secret_ref", secretId: "11111111-1111-4111-8111-111111111111", version: "latest" };
+    expect(onChange).toHaveBeenLastCalledWith({ adapterToken: binding });
+    expect(validateField(binding, schema.properties.adapterToken, true)).toBeNull();
+    await act(async () => {
+      root.render(<JsonSchemaForm schema={schema} values={{ adapterToken: binding }} onChange={onChange} />);
+    });
+    await act(async () => {
+      picker.value = "";
+      picker.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(onChange).toHaveBeenLastCalledWith({});
+    await act(async () => { root.unmount(); });
+  });
+
+  it.each([
+    "77777777-7777-4777-8777-777777777777",
+    "old-plaintext",
+    { type: "secret_ref", secretId: "bad-id" },
+    { type: "secret_ref", secretId: "77777777-7777-4777-8777-777777777777", version: 0 },
+  ])("rejects noncanonical object-only secret input (#%#)", (value) => {
+    expect(validateField(value, { type: "object", format: "secret-ref" }, true)).toBe("Invalid secret reference");
   });
 
   it("renders multiline secret-ref fields as textareas alongside the picker", async () => {

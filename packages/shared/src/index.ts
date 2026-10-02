@@ -2130,6 +2130,7 @@ export {
   type AddApprovalComment,
   envBindingPlainSchema,
   envBindingSecretRefSchema,
+  envBindingSecretRefJsonSchema,
   envBindingUserSecretRefSchema,
   envBindingSchema,
   envConfigSchema,

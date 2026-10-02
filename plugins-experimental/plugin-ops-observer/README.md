@@ -31,7 +31,7 @@ credential. Ops Supervisor's core API has no auth model that can express
 read-only scope, which is why the adapter exists at all: it IS the
 mechanically-proven read-only scope.
 
-`adapterToken` declares the host's `format: "secret-ref"` config schema and is stored as a `{ type: "secret_ref", secretId, version? }` binding. The worker resolves that binding with `ctx.secrets.resolve(binding, { companyId, configPath: "adapterToken" })`; the manifest requests only the SDK's `secrets.read-ref` capability. Plain string tokens remain accepted for compatibility, but are not secret-ref protected. Host config reads return the stored company-scoped config; secret resolution is an explicit SDK call, not an implicit `ctx.config.get` behavior.
+`adapterToken` declares the host's `format: "secret-ref"` config schema and is stored as a `{ type: "secret_ref", secretId, version? }` binding. The worker resolves that binding with `ctx.secrets.resolve(binding, { companyId, configPath: "adapterToken" })`; the manifest requests only the SDK's `secrets.read-ref` capability. New config writes require the object reference and reject plaintext or bare UUID strings. The worker can still read a previously stored plaintext token for compatibility; that path is unprotected plaintext config and is NOT equivalent to secret-ref certification. Existing config is not migrated by this source change. Host config reads return the stored company-scoped config; secret resolution is an explicit SDK call, not an implicit `ctx.config.get` behavior.
 
 
 `ops_work_snapshot_v1` items: project/repo, issue number/title/state,
@@ -85,16 +85,18 @@ returning an expired snapshot. Refresh re-reads; it never writes anywhere.
 No Ops state is persisted inside Paperclip.
 
 Secret-ref designation does not automatically encrypt a raw string placed in
-plugin config. The config API persists and returns the stored `configJson` to
-authorized board callers; legacy raw tokens are therefore plaintext config.
+plugin config. The config API returns the stored `configJson` to
+authorized board callers; previously stored raw tokens are therefore plaintext config.
+The corrected observer manifest rejects new raw-token writes.
 A real secret-ref config stores only the reference object, and explicit scoped
 resolution accesses the company secret. This correction does not migrate the
 live raw-token config or claim an end-to-end UI/API redaction audit.
 
 ## Layout
 
-`plugins-experimental/` — self-contained; nothing outside this directory
-changes. Install from a local path (operator action):
+`plugins-experimental/` — the built plugin is self-contained. Its manifest uses
+the SDK's shared canonical secret-reference schema. Host/API and picker
+regressions live in the server/UI test suites. Install from a local path (operator action):
 `paperclipai plugin install <abs path>`.
 
 ## Tests

@@ -138,7 +138,13 @@ function startFakeAdapter(opts = {}) {
 test("declares the adapter token as a company-secret reference field", async () => {
   const manifestModule = await import("../dist/manifest.js");
   const manifest = manifestModule.default;
-  assert.equal(manifest.instanceConfigSchema.properties.adapterToken.format, "secret-ref");
+  const tokenSchema = manifest.instanceConfigSchema.properties.adapterToken;
+  assert.equal(tokenSchema.format, "secret-ref");
+  assert.equal(tokenSchema.type, "object");
+  assert.deepEqual(tokenSchema.required, ["type", "secretId"]);
+  assert.equal(tokenSchema.additionalProperties, false);
+  assert.equal(tokenSchema.properties.type.const, "secret_ref");
+  assert.equal(tokenSchema.properties.secretId.format, "uuid");
 });
 
 test("worker module registers no actions and no mutating surface", () => {

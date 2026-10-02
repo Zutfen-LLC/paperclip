@@ -1,4 +1,5 @@
 import type { PaperclipPluginManifestV1 } from "@paperclipai/plugin-sdk";
+import { envBindingSecretRefJsonSchema } from "@paperclipai/plugin-sdk";
 import {
   EXPORT_NAMES,
   PAGE_ROUTE,
@@ -46,11 +47,10 @@ const manifest: PaperclipPluginManifestV1 = {
         default: "http://127.0.0.1:18487",
       },
       adapterToken: {
-        type: "string",
-        format: "secret-ref",
+        ...envBindingSecretRefJsonSchema,
         title: "Read-only adapter bearer token",
         description:
-          "Token that authorizes ONLY the adapter's single GET /snapshot route. Select a company secret; raw values are not protected as secrets here.",
+          "Token that authorizes ONLY the adapter's single GET /snapshot route. Select a company secret; new config requires a secret_ref object and rejects plaintext.",
       },
     },
     required: ["adapterBaseUrl", "adapterToken"],

@@ -1236,6 +1236,9 @@ The auto-generated form supports:
 - nested objects rendered as fieldsets
 - arrays rendered as repeatable field groups with add/remove controls
 - secret ref fields: any schema property annotated with `"format": "secret-ref"` renders as a secret picker that stores the shared `{ type: "secret_ref", secretId, version? }` object shape and resolves through the Paperclip secret provider system rather than a plain text input
+- for plugin instance config, use `envBindingSecretRefJsonSchema` from `@paperclipai/plugin-sdk` for each secret field. This schema is generated from the shared `EnvSecretRefBinding` validator, declares an object with `type: "secret_ref"`, a UUID `secretId`, optional `version` (`"latest"` or a positive integer), and the shared optional projection fields. It rejects extra properties. `format: "secret-ref"` remains the picker/path-discovery marker; it does not override JSON Schema types. `type: "string"` with that format does not accept an object binding.
+- object-only secret fields offer the picker without a plaintext input. Legacy string-shaped sandbox-provider fields keep their separate compatibility flow; their owning API handles conversion. The generic plugin config API does not encrypt raw strings or treat a bare UUID as a reference.
+- config reads return the stored reference, never its resolved value. Writes validate company ownership and persist the company/plugin/config-path binding. Worker resolution requires an explicit `companyId`, plus `configPath` when a reference is ambiguous. New reference-only schemas do not migrate existing plaintext config, and plaintext compatibility is not secret-ref certification.
 - validation messages derived from schema constraints (`required`, `minLength`, `pattern`, `minimum`, etc.)
 - a "Test Connection" action if the plugin declares a `validateConfig` RPC method — the host calls it and displays the result inline
 
