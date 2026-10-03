@@ -239,7 +239,8 @@ The collector and scanner require this **actual trusted worker response**, not
 an operator's hand-written `clean` claim: both check receipt schema, exact
 window timestamps, complete/no-inflight state, zero leaks/shape violations,
 scan coverage (`scans >= 2 + reads + inserts`), counters (`reads == cacheReads`,
-`inserts == fetchSuccesses`), numeric limits and digest shape. A failed or
+`inserts == fetchSuccesses`, `entriesInspected >= inserts`), numeric limits
+and digest shape (positive inspections require a nonzero digest). A failed or
 unchecked scan cannot pass. These structural checks do not authenticate a
 forged receipt: retain the authorized bridge transport capture, company scope,
 start/close response linkage and deployment/process identity for later #3

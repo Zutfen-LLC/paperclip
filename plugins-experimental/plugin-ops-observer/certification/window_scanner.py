@@ -55,13 +55,16 @@ def validate_cache_receipt(receipt, start, end):
         _reject('cache_inventory_limit')
     if (evidence['leaks'] or evidence['shapeViolations']
         or evidence['scans'] < 2 + evidence['reads'] + evidence['inserts']
+        or evidence['entriesInspected'] < evidence['inserts']
         or evidence['reads'] != counters.get('cacheReads')
         or evidence['inserts'] != counters.get('fetchSuccesses')
         or type(counters.get('cacheReads')) is not int
         or type(counters.get('fetchSuccesses')) is not int):
         _reject('cache_receipt_mismatch')
     digest = evidence.get('digest')
-    if not isinstance(digest, str) or len(digest) != 64 or any(c not in '0123456789abcdef' for c in digest):
+    if (not isinstance(digest, str) or len(digest) != 64
+        or any(c not in '0123456789abcdef' for c in digest)
+        or (evidence['entriesInspected'] > 0 and digest == '0' * 64)):
         _reject('cache_receipt_integrity')
 
 
