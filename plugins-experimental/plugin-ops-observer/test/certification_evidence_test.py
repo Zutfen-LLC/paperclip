@@ -112,6 +112,22 @@ class AdapterTests(unittest.TestCase):
         self.assertNotIn(SECRET, json.dumps(report))
         self.assertNotIn(LEAK, json.dumps(report))
 
+    def test_non_get_is_sticky_in_both_mixed_orders(self):
+        for methods in (('POST', 'GET'), ('GET', 'POST')):
+            with self.subTest(methods=methods):
+                with AdapterEvidence(self.module) as evidence:
+                    for method in methods:
+                        try:
+                            self.module.urlopen(Request(self.upstream.url + '/api/tasks', method=method), timeout=2)
+                        except HTTPError:
+                            pass
+                    report = evidence.close()
+                self.assertEqual(report['opsAttempts'], 2)
+                self.assertEqual(report['upstreamMethod'], 'other')
+                self.assertEqual(report['status'], 'incomplete')
+                self.assertEqual(report['incompleteReason'], 'non_get_upstream')
+                self.assertEqual(report, evidence.close())
+
     def test_redirect_real_opener_refuses_target_without_echo(self):
         target_hits = []
         class Target(BaseHTTPRequestHandler):

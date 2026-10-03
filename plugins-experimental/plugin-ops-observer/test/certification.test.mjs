@@ -269,3 +269,63 @@ test('completed receipt stays fixed while a later snapshot config lookup is pend
   await assert.rejects(pending, /destination not approved/);
   assert.deepEqual(await h.read('stable-complete'), closed);
 });
+
+test('authorized bridge exports bounded private-free cache inventory covering reads and inserts', async () => {
+  cache.clear(); const h = harness();
+  const fixture = await serve((_req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(snapshot)); });
+  try { await transport(fixture, async () => {
+    await h.read('inventory-a', 'start');
+    await h.get('inventory-a'); await h.get('inventory-a');
+    const closed = await h.read('inventory-a', 'close');
+    assert.equal(closed.status, 'complete');
+    assert.equal(closed.cacheIdentifiers.schema, 'ops_worker_cache_identifiers_v1');
+    assert.equal(closed.cacheIdentifiers.reads, 2);
+    assert.equal(closed.cacheIdentifiers.inserts, 1);
+    assert.ok(closed.cacheIdentifiers.entriesInspected >= 3);
+    assert.equal(closed.cacheIdentifiers.leaks, 0);
+    assert.equal(closed.cacheIdentifiers.shapeViolations, 0);
+    assert.match(closed.cacheIdentifiers.digest, /^[a-f0-9]{64}$/);
+    assert.equal(JSON.stringify(closed).includes('inventory-a'), false);
+    assert.equal(JSON.stringify(closed).includes(secret), false);
+    assert.equal(JSON.stringify(closed).includes(origin), false);
+    const other = await h.read('inventory-b', 'start');
+    assert.equal(other.cacheIdentifiers.entriesInspected, 0);
+  }); } finally { cache.clear(); }
+});
+
+test('preexisting malformed identifier fails closed without exporting raw keys', async () => {
+  cache.clear(); const h = harness();
+  cache.set(JSON.stringify(['leaky', origin + secret]), { fetchedAt: Date.now(), snapshot });
+  const leaky = await h.read('leaky', 'start');
+  assert.equal(leaky.status, 'incomplete');
+  assert.equal(leaky.incompleteReason, 'cache_identifier_hygiene');
+  assert.equal(leaky.cacheIdentifiers.shapeViolations, 1);
+  assert.equal(JSON.stringify(leaky).includes(secret), false);
+  cache.clear(); cache.set('not-a-schema-key', { fetchedAt: Date.now(), snapshot });
+  const malformed = await h.read('malformed', 'start');
+  assert.equal(malformed.status, 'incomplete');
+  assert.equal(malformed.incompleteReason, 'cache_identifier_hygiene');
+  cache.clear();
+});
+
+test('cache receipt freezes on overlapping close and rejected origin does not access cache or secret', async () => {
+  cache.clear(); let release; let resolutions = 0;
+  const h = harness(() => config, async () => { resolutions++; return secret; });
+  const bad = harness(() => ({ ...config, adapterBaseUrl: 'http://127.0.0.1:18488' }), async () => { throw Error('secret must not resolve'); });
+  const fixture = await serve((_req, res) => { release = () => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(snapshot)); }; });
+  try { await transport(fixture, async () => {
+    await h.read('overlap-cache', 'start');
+    const pending = h.get('overlap-cache');
+    while (!release) await new Promise(done => setTimeout(done, 1));
+    const closed = await h.read('overlap-cache', 'close');
+    assert.equal(closed.status, 'incomplete');
+    release(); await pending;
+    assert.deepEqual(await h.read('overlap-cache'), closed);
+    await bad.read('rejected-cache', 'start');
+    await assert.rejects(() => bad.get('rejected-cache'), /destination not approved/);
+    const rejected = await bad.read('rejected-cache', 'close');
+    assert.equal(rejected.cacheIdentifiers.reads, 0);
+    assert.equal(rejected.cacheIdentifiers.inserts, 0);
+    assert.equal(resolutions, 1);
+  }); } finally { if (release) release(); cache.clear(); }
+});
