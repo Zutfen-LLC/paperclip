@@ -308,11 +308,53 @@ test('preexisting malformed identifier fails closed without exporting raw keys',
   cache.clear();
 });
 
+test('cache evidence resets per window and isolates another company while terminal receipt freezes', async () => {
+  cache.clear(); const h = harness();
+  cache.set(JSON.stringify(['reset-a', origin]), { fetchedAt: Date.now(), snapshot });
+  const first = await h.read('reset-a', 'start');
+  assert.equal(first.cacheIdentifiers.entriesInspected, 1);
+  const closed = await h.read('reset-a', 'close');
+  assert.equal(closed.cacheIdentifiers.entriesInspected, 2);
+  const b = await h.read('reset-b', 'start');
+  assert.equal(b.cacheIdentifiers.entriesInspected, 0);
+  const second = await h.read('reset-a', 'start');
+  assert.equal(second.cacheIdentifiers.entriesInspected, 1);
+  assert.equal(second.cacheIdentifiers.scans, 1);
+  assert.equal(closed.cacheIdentifiers.entriesInspected, 2);
+  cache.clear();
+});
+
+test('worker scans resolved plaintext against valid-shaped live identifiers without exporting it', async () => {
+  cache.clear();
+  const companyId = secret;
+  cache.set(JSON.stringify([companyId, origin]), { fetchedAt: Date.now(), snapshot });
+  const h = harness();
+  await h.read(companyId, 'start');
+  await h.get(companyId);
+  const receipt = await h.read(companyId, 'close');
+  assert.equal(receipt.status, 'incomplete');
+  assert.equal(receipt.incompleteReason, 'cache_identifier_hygiene');
+  assert.ok(receipt.cacheIdentifiers.leaks > 0);
+  assert.equal(JSON.stringify(receipt).includes(secret), false);
+  cache.clear();
+});
+
+test('oversize cache inventory cannot claim complete and does not disclose identifiers', async () => {
+  cache.clear();
+  const h = harness();
+  cache.set(JSON.stringify(['limit-company', origin]) + 'x'.repeat(5000), { fetchedAt: Date.now(), snapshot });
+  const receipt = await h.read('limit-company', 'start');
+  assert.equal(receipt.status, 'incomplete');
+  assert.equal(receipt.incompleteReason, 'cache_inventory_limit');
+  assert.equal(JSON.stringify(receipt).includes('limit-company'), false);
+  cache.clear();
+});
+
 test('cache receipt freezes on overlapping close and rejected origin does not access cache or secret', async () => {
   cache.clear(); let release; let resolutions = 0;
   const h = harness(() => config, async () => { resolutions++; return secret; });
   const bad = harness(() => ({ ...config, adapterBaseUrl: 'http://127.0.0.1:18488' }), async () => { throw Error('secret must not resolve'); });
-  const fixture = await serve((_req, res) => { release = () => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(snapshot)); }; });
+  const fixture = await serve((_req, res) => { release = () => { if (!res.headersSent) { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(snapshot)); } }; });
   try { await transport(fixture, async () => {
     await h.read('overlap-cache', 'start');
     const pending = h.get('overlap-cache');

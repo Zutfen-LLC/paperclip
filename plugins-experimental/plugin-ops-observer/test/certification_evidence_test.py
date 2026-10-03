@@ -128,6 +128,19 @@ class AdapterTests(unittest.TestCase):
                 self.assertEqual(report['incompleteReason'], 'non_get_upstream')
                 self.assertEqual(report, evidence.close())
 
+    def test_explicit_sensitive_header_ownership_is_sticky(self):
+        with AdapterEvidence(self.module) as evidence:
+            for headers in ({'Authorization': SECRET, 'Cookie': LEAK}, {}):
+                with self.module.urlopen(Request(self.upstream.url + '/api/tasks', headers=headers), timeout=2):
+                    pass
+            report = evidence.close()
+        self.assertEqual(report['upstreamMethod'], 'GET')
+        self.assertFalse(report['headersOnlyOwned'])
+        self.assertTrue(report['upstreamAuthorizationAttached'])
+        self.assertTrue(report['upstreamCookieAttached'])
+        self.assertNotIn(SECRET, json.dumps(report))
+        self.assertNotIn(LEAK, json.dumps(report))
+
     def test_redirect_real_opener_refuses_target_without_echo(self):
         target_hits = []
         class Target(BaseHTTPRequestHandler):
@@ -193,7 +206,23 @@ class ScannerTests(unittest.TestCase):
         for category in CATEGORIES:
             self.put(category, {'ordinary': 'safe'})
 
+    def cache_receipt(self):
+        return {'schema': 'ops_observer_certification_v1', 'status': 'complete',
+                'incompleteReason': None, 'startedAt': 100, 'endedAt': 200, 'inFlight': 0,
+                'upstreamMethod': 'none', 'adapterAuthHeaderAttached': False,
+                'counters': {'acceptedOrigin': 0, 'rejectedOrigin': 0,
+                    'secretResolutionAttempts': 0, 'secretResolutionFailures': 0,
+                    'cacheReads': 0, 'cacheHits': 0, 'cacheMisses': 0,
+                    'cacheRefreshes': 0, 'fetchAttempts': 0, 'fetchSuccesses': 0,
+                    'fetchFailures': 0, 'redirectRefusals': 0, 'upstreamGet': 0,
+                    'adapterAuthAttached': 0},
+                'cacheIdentifiers': {'schema': 'ops_worker_cache_identifiers_v1',
+                    'scans': 2, 'entriesInspected': 0, 'reads': 0, 'inserts': 0,
+                    'leaks': 0, 'shapeViolations': 0, 'digest': '0' * 64}}
+
     def put(self, category, payload):
+        if category == 'cache_identifiers' and 'receipt' not in payload:
+            payload = {'receipt': self.cache_receipt(), 'metadata': payload}
         records = [{'seq': 0, 'at': 100, 'kind': 'start', 'payload': {}},
                    {'seq': 1, 'at': 150, 'kind': 'data', 'payload': payload},
                    {'seq': 2, 'at': 200, 'kind': 'end', 'payload': {}}]
@@ -259,12 +288,36 @@ class ScannerTests(unittest.TestCase):
         self.assertNotIn(SECRET, result.stdout + result.stderr)
         self.assertNotIn(str(self.root), result.stdout + result.stderr)
 
+    def test_cache_receipt_must_be_trusted_shape_complete_and_consistent(self):
+        for mutation in (lambda r: r.update(status='incomplete'),
+                         lambda r: r.update(endedAt=201),
+                         lambda r: r['cacheIdentifiers'].update(leaks=1),
+                         lambda r: r['cacheIdentifiers'].update(shapeViolations=1),
+                         lambda r: r['cacheIdentifiers'].update(scans=1),
+                         lambda r: r['cacheIdentifiers'].update(reads=1),
+                         lambda r: r['cacheIdentifiers'].update(digest='bad'),
+                         lambda r: r.update(rawKeys=['private-company']),
+                         lambda r: r['cacheIdentifiers'].update(rawKeys=['private-company'])):
+            receipt = self.cache_receipt()
+            mutation(receipt)
+            self.put('cache_identifiers', {'receipt': receipt})
+            with self.assertRaises(EvidenceError): self.scan()
+        self.put('cache_identifiers', {'receipt': self.cache_receipt()})
+        self.assertEqual(self.scan()['status'], 'clean')
+
+    def test_cache_receipt_plaintext_positive_control(self):
+        receipt = self.cache_receipt()
+        self.put('cache_identifiers', {'receipt': receipt, 'unexpected': SECRET})
+        self.assertEqual(self.scan()['status'], 'leak')
+        self.assertNotIn(SECRET, json.dumps(self.scan()))
+
     def test_collector_ingests_actual_export_files_and_rejects_unattested_or_overflow(self):
         export = {'schema': 'ops_observer_export_v1', 'window': 'isolated-1',
                   'startedAt': 100, 'endedAt': 200, 'sources': {}}
         for category in CATEGORIES:
             path = self.root / ('raw-' + category)
-            raw = json.dumps({'events': [], 'note': 'actually exported'}).encode()
+            raw = json.dumps(self.cache_receipt() if category == 'cache_identifiers'
+                             else {'events': [], 'note': 'actually exported'}).encode()
             path.write_bytes(raw)
             export['sources'][category] = {'path': str(path), 'bytes': len(raw),
               'sha256': hashlib.sha256(raw).hexdigest(), 'coverage': {
@@ -272,6 +325,16 @@ class ScannerTests(unittest.TestCase):
                 'overflow': False, 'collector': 'operator-export', 'startCursor': 'before', 'endCursor': 'after'}}
         result = collect_inventory(export, self.root / 'collected')
         self.assertEqual(scan_inventory(result, [SECRET])['status'], 'clean')
+        fake = (self.root / 'raw-cache_identifiers')
+        forged = b'{"status":"clean"}'
+        fake.write_bytes(forged)
+        export['sources']['cache_identifiers']['bytes'] = len(forged)
+        export['sources']['cache_identifiers']['sha256'] = hashlib.sha256(forged).hexdigest()
+        with self.assertRaises(EvidenceError): collect_inventory(export, self.root / 'fake-cache')
+        proper = json.dumps(self.cache_receipt()).encode()
+        fake.write_bytes(proper)
+        export['sources']['cache_identifiers']['bytes'] = len(proper)
+        export['sources']['cache_identifiers']['sha256'] = hashlib.sha256(proper).hexdigest()
         export['sources']['worker_logs']['coverage']['startCursor'] = ''
         with self.assertRaises(EvidenceError): collect_inventory(export, self.root / 'bad')
         export['sources']['worker_logs']['coverage']['startCursor'] = 'before'

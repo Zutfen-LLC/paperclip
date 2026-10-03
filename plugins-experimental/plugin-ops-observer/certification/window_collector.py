@@ -8,7 +8,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
-from window_scanner import CATEGORIES, EvidenceError, MAX_SOURCE_BYTES
+from window_scanner import CATEGORIES, EvidenceError, MAX_SOURCE_BYTES, validate_cache_receipt
 
 
 def collect_inventory(export, destination):
@@ -40,7 +40,12 @@ def collect_inventory(export, destination):
             if (source.get('bytes') != len(raw) or
                 source.get('sha256') != hashlib.sha256(raw).hexdigest()):
                 raise EvidenceError('export_integrity_failure')
-            captures[category] = raw.decode('utf-8')
+            text = raw.decode('utf-8')
+            if category == 'cache_identifiers':
+                try: cache_receipt = json.loads(text)
+                except ValueError: raise EvidenceError('cache_receipt_required') from None
+                validate_cache_receipt(cache_receipt, start, end)
+            captures[category] = text
         except (OSError, UnicodeError):
             raise EvidenceError('export_unavailable_or_encoding') from None
     destination = Path(destination)

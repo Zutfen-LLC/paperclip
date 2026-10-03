@@ -1,7 +1,7 @@
 import { definePlugin, runWorker } from "@paperclipai/plugin-sdk";
 import type { EnvSecretRefBinding } from "@paperclipai/plugin-sdk";
 import { CACHE_TTL_MS, DATA_KEYS } from "./constants.js";
-import { certificationWindow, invalidateCertification, observeRequest, requestStarted } from "./certification.js";
+import { certificationWindow, invalidateCertification, observeRequest, requestStarted, scanCacheIdentifiers } from "./certification.js";
 
 /**
  * Ops Supervisor read-only observer worker.
@@ -119,6 +119,14 @@ const plugin = definePlugin({
         invalidateCertification(companyId, "certification_disabled");
         throw new Error("Certification not enabled");
       }
+      if (params?.command === "start") {
+        certificationWindow(companyId, "start");
+        scanCacheIdentifiers(companyId, cache.keys(), APPROVED_ADAPTER_ORIGIN);
+        return certificationWindow(companyId);
+      }
+      if (params?.command === "close" || params?.command === undefined) {
+        scanCacheIdentifiers(companyId, cache.keys(), APPROVED_ADAPTER_ORIGIN);
+      }
       return certificationWindow(companyId, params?.command);
     });
     ctx.data.register(DATA_KEYS.snapshot, async (params) => {
@@ -157,6 +165,8 @@ const plugin = definePlugin({
           throw new Error("Ops snapshot credential unavailable (fail closed)");
         }
         const cacheKey = JSON.stringify([companyId, baseUrl]);
+        scanCacheIdentifiers(companyId, cache.keys(), APPROVED_ADAPTER_ORIGIN,
+          resolveBinding ? [token, tokenRef.secretId] : [token], "read");
         evidence.count("cacheReads");
         const cached = cache.get(cacheKey);
         if (cached && isFresh(cached)) {
@@ -173,6 +183,8 @@ const plugin = definePlugin({
           const snapshot = await fetchSnapshot(baseUrl, token, evidence.count);
           const entry: CachedEntry = { fetchedAt: Date.now(), snapshot };
           cache.set(cacheKey, entry);
+          scanCacheIdentifiers(companyId, cache.keys(), APPROVED_ADAPTER_ORIGIN,
+            resolveBinding ? [token, tokenRef.secretId] : [token], "insert");
           const envelope: SnapshotEnvelope = {
             fetchedAt: entry.fetchedAt,
             snapshot: entry.snapshot,

@@ -60,6 +60,7 @@ class AdapterEvidence:
                            upstreamCookieAttached=False, upstreamProxyAuthorizationAttached=False,
                            inFlight=0)
         self.events = 0
+        self.non_get_seen = False
         self.closed = None
         self.installed = False
 
@@ -113,7 +114,11 @@ class AdapterEvidence:
             if self._event():
                 with self.lock:
                     self.report['opsAttempts'] += 1
-                    self.report['upstreamMethod'] = method if method == 'GET' else 'other'
+                    if method != 'GET':
+                        self.non_get_seen = True
+                        self.report['upstreamMethod'] = 'other'
+                    elif self.report['upstreamMethod'] == 'none':
+                        self.report['upstreamMethod'] = 'GET'
                     self.report['headersOnlyOwned'] &= not bool(header_names)
                     for key, name in [('upstreamAuthorizationAttached', 'authorization'),
                                       ('upstreamCookieAttached', 'cookie'),
@@ -151,6 +156,9 @@ class AdapterEvidence:
                         self.report['incompleteReason'] = 'request_overlap'
                     else:
                         self.report['status'] = 'complete'
+                if self.non_get_seen and self.report['status'] == 'complete':
+                    self.report['status'] = 'incomplete'
+                    self.report['incompleteReason'] = 'non_get_upstream'
                 self.closed = dict(self.report)
             return dict(self.closed)
 

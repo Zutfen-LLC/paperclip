@@ -106,8 +106,8 @@ caller uses the existing scoped plugin data bridge:
 
 Receipt shape: `schema`, `status`, `incompleteReason` (null or one of
 `request_overlap`, `window_expired`, `event_limit`, `certification_disabled`,
-`config_unavailable`), `startedAt`, `endedAt` (number/null),
-`inFlight`, `counters`, `upstreamMethod` (`GET`/`none`), and
+`config_unavailable`, `cache_identifier_hygiene`, `cache_inventory_limit`), `startedAt`, `endedAt` (number/null),
+`inFlight`, `counters`, `cacheIdentifiers`, `upstreamMethod` (`GET`/`none`), and
 `adapterAuthHeaderAttached` (boolean). `inFlight` is live only for an active
 window; terminal receipts freeze its value at closure or invalidation and do
 not reflect later requests. Counters: `acceptedOrigin`,
@@ -196,9 +196,58 @@ Adapter receipt `ops_adapter_evidence_v1`: `status` (`complete` or
 `upstreamAuthorizationAttached`, `upstreamCookieAttached`, and
 `upstreamProxyAuthorizationAttached`. "Success" means the opener returned a
 response (not that the complete snapshot parsed); failures include opener
-exceptions. The limit is 10,000 observed events / five minutes. This hook
+exceptions. The limit is 10,000 observed events / five minutes. A non-GET
+method is sticky (`other`), and a fully observed mixed-method window closes
+`incomplete` with exact reason `non_get_upstream` in either order; an earlier
+overlap/expiry/limit reason is not overwritten. Explicit sensitive header
+ownership (`headersOnlyOwned: false`) also remains sticky across later calls.
+This hook
 instruments a launched module; it is **not** installed in the running Ops unit,
 and a successful isolated receipt is not production certification.
+
+### Installed-worker cache identifier evidence
+
+The same **authorized company-scoped** `ops-certification` data bridge above
+provides the cache-identifier export. Enable certification for that company,
+call `start` before measured reads, then `close` after requests drain and save
+**the exact `data` receipt JSON** from the installed worker as the
+`cache_identifiers` UTF-8 export file. Do not dump `cache.keys()` or copy raw
+identifiers to the scanner. The worker scans its own process-private map at
+start, before every accepted-origin cache read (while the resolved token and
+secret-ref ID are still local), immediately after every insertion, and at
+read/close. It checks canonical `[companyId, pinnedOrigin]` key shape and
+compares live identifier plaintext against available resolved private values;
+no raw key, company identifier, token, secret ID, or secret value leaves the
+worker. A per-window random-key HMAC chain binds inspected identifiers in the
+receipt without an enumerable raw SHA-256 of the company ID. `cacheIdentifiers`
+contains `schema: ops_worker_cache_identifiers_v1`, `scans`,
+`entriesInspected` (cumulative inspected company entries, including repeated
+checks), `reads`, `inserts`, `leaks`, `shapeViolations`, and `digest` (64 hex
+characters). Zero `entriesInspected` is legitimate only when the complete
+window has no company cache entries. The installed cache is process-local:
+worker restart, disabled config, unavailable config, an overlapping request,
+uncanonical/unknown key, secret hit, >10,000 scans/inspections or >10,000 keys
+in any scan, or >4 KiB identifier marks the window incomplete. `start`,
+read/insert and close checks all run synchronously with the Map; an accepted
+request cannot insert after a complete close because in-flight requests cause
+`request_overlap`. Origin rejection happens before secret resolution and cache
+access; the certification bridge's own start/close inventory is a separate
+authorized read, not work performed by a rejected snapshot request. Mode-off
+snapshot behavior and envelopes are unchanged.
+
+The collector and scanner require this **actual trusted worker response**, not
+an operator's hand-written `clean` claim: both check receipt schema, exact
+window timestamps, complete/no-inflight state, zero leaks/shape violations,
+scan coverage (`scans >= 2 + reads + inserts`), counters (`reads == cacheReads`,
+`inserts == fetchSuccesses`), numeric limits and digest shape. A failed or
+unchecked scan cannot pass. These structural checks do not authenticate a
+forged receipt: retain the authorized bridge transport capture, company scope,
+start/close response linkage and deployment/process identity for later #3
+independent review. The internal plaintext comparison applies to resolved
+worker token and secret-ref ID available on accepted requests. Any *other*
+sensitive values/streams remain in the seven externally collected categories;
+external scanner stdin values never enter the worker. No hash alone proves
+plaintext absence.
 
 ### Operator export and scan contract for later #3 (not run here)
 
@@ -206,8 +255,8 @@ and a successful isolated receipt is not production certification.
    worker's `ops-certification` start/close receipt. Before measured traffic,
    checkpoint every relevant sink: installed worker process logs (including
    rotation/journal cursors), plugin/host logs, adapter service logs, errors,
-   runtime telemetry, in-memory cache identifiers, emitted data envelopes,
-   and durable receipt fields. Capture all matching processes/streams, not a
+   runtime telemetry, the installed-worker `cache_identifiers` receipt via the
+   authorized bridge above, emitted data envelopes, and durable receipt fields. Capture all matching processes/streams, not a
    filtered sample. Record start cursors **before** traffic and end cursors
    **after** traffic and after pending requests/drains; prove continuity across
    restarts, rotation and pagination. If a sink is inaccessible or a restart,

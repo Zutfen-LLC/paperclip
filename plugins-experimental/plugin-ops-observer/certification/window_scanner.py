@@ -7,18 +7,65 @@ import hashlib
 import json
 import sys
 from pathlib import Path
+from typing import NoReturn
 
 CATEGORIES = ('worker_logs', 'plugin_logs', 'adapter_logs', 'errors', 'telemetry',
               'cache_identifiers', 'emitted_envelopes', 'persisted_receipts')
 MAX_SOURCE_BYTES = 4 * 1024 * 1024
 MAX_RECORDS = 10_000
+CACHE_RECEIPT_FIELDS = frozenset(('schema', 'status', 'incompleteReason',
+    'startedAt', 'endedAt', 'inFlight', 'counters', 'cacheIdentifiers',
+    'upstreamMethod', 'adapterAuthHeaderAttached'))
+CACHE_EVIDENCE_FIELDS = frozenset(('schema', 'scans', 'entriesInspected',
+    'reads', 'inserts', 'leaks', 'shapeViolations', 'digest'))
+WORKER_COUNTER_FIELDS = frozenset(('acceptedOrigin', 'rejectedOrigin',
+    'secretResolutionAttempts', 'secretResolutionFailures', 'cacheReads',
+    'cacheHits', 'cacheMisses', 'cacheRefreshes', 'fetchAttempts',
+    'fetchSuccesses', 'fetchFailures', 'redirectRefusals', 'upstreamGet',
+    'adapterAuthAttached'))
 
 
 class EvidenceError(ValueError):
     pass
 
 
-def _reject(reason):
+def validate_cache_receipt(receipt, start, end):
+    """Validate a worker-generated, authorized bridge receipt, not a made-up clean file.
+
+    Provenance of the captured bridge response remains an operator attestation;
+    metadata alone cannot authenticate an installed process against forgery.
+    """
+    if not isinstance(receipt, dict) or receipt.get('schema') != 'ops_observer_certification_v1':
+        _reject('cache_receipt_required')
+    evidence = receipt.get('cacheIdentifiers')
+    counters = receipt.get('counters')
+    if (receipt.get('status') != 'complete' or receipt.get('incompleteReason') is not None
+        or receipt.get('startedAt') != start or receipt.get('endedAt') != end
+        or type(receipt.get('inFlight')) is not int or receipt['inFlight'] != 0
+        or not isinstance(evidence, dict) or evidence.get('schema') != 'ops_worker_cache_identifiers_v1'
+        or not isinstance(counters, dict)):
+        _reject('cache_receipt_incomplete')
+    if (set(receipt) != CACHE_RECEIPT_FIELDS or set(evidence) != CACHE_EVIDENCE_FIELDS
+        or set(counters) != WORKER_COUNTER_FIELDS
+        or any(type(value) is not int or not 0 <= value <= MAX_RECORDS
+               for value in counters.values())):
+        _reject('cache_receipt_shape')
+    fields = ('scans', 'entriesInspected', 'reads', 'inserts', 'leaks', 'shapeViolations')
+    if any(type(evidence.get(k)) is not int or not 0 <= evidence[k] <= MAX_RECORDS for k in fields):
+        _reject('cache_inventory_limit')
+    if (evidence['leaks'] or evidence['shapeViolations']
+        or evidence['scans'] < 2 + evidence['reads'] + evidence['inserts']
+        or evidence['reads'] != counters.get('cacheReads')
+        or evidence['inserts'] != counters.get('fetchSuccesses')
+        or type(counters.get('cacheReads')) is not int
+        or type(counters.get('fetchSuccesses')) is not int):
+        _reject('cache_receipt_mismatch')
+    digest = evidence.get('digest')
+    if not isinstance(digest, str) or len(digest) != 64 or any(c not in '0123456789abcdef' for c in digest):
+        _reject('cache_receipt_integrity')
+
+
+def _reject(reason) -> NoReturn:
     raise EvidenceError(reason)
 
 
@@ -64,6 +111,17 @@ def scan_inventory(inventory, values, *, max_source_bytes=MAX_SOURCE_BYTES, max_
         if not isinstance(data, dict) or data.get('window') != window or not isinstance(data.get('records'), list):
             _reject('invalid_records')
         records = data['records']
+        if category == 'cache_identifiers':
+            if len(records) != 3 or not isinstance(records[1], dict):
+                _reject('cache_receipt_required')
+            payload = records[1].get('payload')
+            if not isinstance(payload, dict): _reject('cache_receipt_required')
+            if 'export' in payload:
+                try: worker_receipt = json.loads(payload['export'])
+                except (TypeError, ValueError): _reject('cache_receipt_required')
+            else:
+                worker_receipt = payload.get('receipt')
+            validate_cache_receipt(worker_receipt, start, end)
         if not 3 <= len(records) <= max_records: _reject('record_limit_or_empty')
         if any(not isinstance(record, dict) for record in records): _reject('invalid_record')
         if (records[0].get('kind') != 'start' or records[-1].get('kind') != 'end'

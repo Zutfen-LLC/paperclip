@@ -1,4 +1,5 @@
 // Bounded, process-local evidence only. No request values or identifiers enter receipts.
+import { createHmac, randomBytes } from "node:crypto";
 const WINDOW_MS = 300_000;
 const MAX_COMPANIES = 64;
 const MAX_EVENTS = 10_000;
@@ -8,7 +9,12 @@ const names = [
   "fetchSuccesses", "fetchFailures", "redirectRefusals", "upstreamGet", "adapterAuthAttached",
 ] as const;
 type Name = typeof names[number];
-type IncompleteReason = "request_overlap" | "window_expired" | "event_limit" | "certification_disabled" | "config_unavailable";
+type IncompleteReason = "request_overlap" | "window_expired" | "event_limit" | "certification_disabled" | "config_unavailable" | "cache_identifier_hygiene" | "cache_inventory_limit";
+type CacheEvidence = {
+  schema: "ops_worker_cache_identifiers_v1";
+  scans: number; entriesInspected: number; reads: number; inserts: number;
+  leaks: number; shapeViolations: number; digest: string;
+};
 type Window = {
   startedAt: number;
   endedAt?: number;
@@ -17,6 +23,8 @@ type Window = {
   events: number;
   counters: Record<Name, number>;
   terminalInFlight?: number;
+  cacheIdentifiers: CacheEvidence;
+  cacheDigestKey: Buffer;
 };
 const windows = new Map<string, Window>();
 // Tracks requests even when not instrumented: opening a window mid-request cannot certify completeness.
@@ -42,6 +50,7 @@ function receipt(window: Window, companyId: string) {
     endedAt: window.endedAt ?? null,
     inFlight: window.terminalInFlight ?? (pending.get(companyId) ?? 0),
     counters: { ...window.counters },
+    cacheIdentifiers: { ...window.cacheIdentifiers },
     upstreamMethod: window.counters.upstreamGet > 0 ? "GET" as const : "none" as const,
     adapterAuthHeaderAttached: window.counters.adapterAuthAttached > 0,
   };
@@ -53,7 +62,11 @@ export function certificationWindow(companyId: string, command?: unknown) {
     if (previous?.status === "active") throw new Error("Certification window already active");
     if (!previous && windows.size >= MAX_COMPANIES) throw new Error("Certification window capacity reached");
     const counters = Object.fromEntries(names.map(name => [name, 0])) as Record<Name, number>;
-    const window: Window = { startedAt: Date.now(), status: "active", events: 0, counters };
+    const window: Window = { startedAt: Date.now(), status: "active", events: 0, counters,
+      cacheDigestKey: randomBytes(32), cacheIdentifiers: {
+        schema: "ops_worker_cache_identifiers_v1", scans: 0, entriesInspected: 0,
+        reads: 0, inserts: 0, leaks: 0, shapeViolations: 0, digest: "0".repeat(64),
+      } };
     // An earlier request overlaps the start, so the entire window cannot be certified.
     if ((pending.get(companyId) ?? 0) > 0) finish(window, companyId, "incomplete", "request_overlap");
     windows.set(companyId, window);
@@ -69,6 +82,48 @@ export function certificationWindow(companyId: string, command?: unknown) {
   }
   return receipt(window, companyId);
 }
+// Scan the actual process-private map at start, every read/insert, and close.
+// The installed company's authorized data bridge exports only counts and a
+// per-window keyed digest, never identifiers or secret bytes.
+export function scanCacheIdentifiers(companyId: string, keys: Iterable<string>,
+  approvedOrigin: string, privateValues: readonly string[] = [], operation?: "read" | "insert") {
+  const window = windows.get(companyId);
+  if (!window || window.status !== "active") return;
+  expire(window, companyId);
+  if (window.status !== "active") return;
+  const inventory = window.cacheIdentifiers;
+  if (inventory.scans >= MAX_EVENTS) {
+    finish(window, companyId, "incomplete", "cache_inventory_limit"); return;
+  }
+  inventory.scans++;
+  if (operation === "read") inventory.reads++;
+  if (operation === "insert") inventory.inserts++;
+  let visited = 0;
+  for (const key of keys) {
+    if (++visited > MAX_EVENTS || inventory.entriesInspected >= MAX_EVENTS || key.length > 4096) {
+      finish(window, companyId, "incomplete", "cache_inventory_limit"); return;
+    }
+    let parts: unknown;
+    try { parts = JSON.parse(key); } catch { parts = null; }
+    if (!Array.isArray(parts) || parts.length !== 2 || typeof parts[0] !== "string"
+      || typeof parts[1] !== "string" || key !== JSON.stringify(parts)) {
+      inventory.shapeViolations++;
+      finish(window, companyId, "incomplete", "cache_identifier_hygiene"); return;
+    }
+    if (parts[0] !== companyId) continue;
+    inventory.entriesInspected++;
+    if (parts[1] !== approvedOrigin) inventory.shapeViolations++;
+    // Scan plaintext while a resolved value is still inside the worker. A
+    // digest by itself cannot establish absence of a plaintext secret.
+    for (const value of privateValues) if (value && key.includes(value)) inventory.leaks++;
+    inventory.digest = createHmac("sha256", window.cacheDigestKey)
+      .update(inventory.digest).update(key).digest("hex");
+    if (inventory.leaks || inventory.shapeViolations) {
+      finish(window, companyId, "incomplete", "cache_identifier_hygiene"); return;
+    }
+  }
+}
+
 // Fail closed only for the company's currently active window. Closed evidence
 // is immutable, and unrelated company windows must not be affected.
 export function invalidateCertification(companyId: string, reason: "certification_disabled" | "config_unavailable") {
