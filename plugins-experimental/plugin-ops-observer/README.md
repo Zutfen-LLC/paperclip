@@ -89,7 +89,10 @@ caller uses the existing scoped plugin data bridge:
   `params: { "command": "close" }` closes it. Response is `{ "data": receipt }`.
   This is a getData read bridge, **not** a new action, capability, or write API.
 - `status: "complete"` only when explicitly closed before expiry, without
-  overlapping requests. `status: "active"` is not final evidence;
+  overlapping requests (snapshot work or certification config lookups). A
+  certification read releases its own config lookup before the synchronous
+  start/close decision, while unresolved earlier same-company reads still
+  prevent completion. `status: "active"` is not final evidence;
   `status: "incomplete"` means an in-flight request overlapped close/start, the
   five-minute limit expired, the 10,000-event budget overflowed, or config was
   unavailable/disabled during an active window (whether observed by snapshot
@@ -105,7 +108,9 @@ Receipt shape: `schema`, `status`, `incompleteReason` (null or one of
 `request_overlap`, `window_expired`, `event_limit`, `certification_disabled`,
 `config_unavailable`), `startedAt`, `endedAt` (number/null),
 `inFlight`, `counters`, `upstreamMethod` (`GET`/`none`), and
-`adapterAuthHeaderAttached` (boolean). Counters: `acceptedOrigin`,
+`adapterAuthHeaderAttached` (boolean). `inFlight` is live only for an active
+window; terminal receipts freeze its value at closure or invalidation and do
+not reflect later requests. Counters: `acceptedOrigin`,
 `rejectedOrigin`, `secretResolutionAttempts`, `secretResolutionFailures`,
 `cacheReads`, `cacheHits`, `cacheMisses`, `cacheRefreshes`, `fetchAttempts`,
 `fetchSuccesses`, `fetchFailures`, `redirectRefusals`, `upstreamGet`,

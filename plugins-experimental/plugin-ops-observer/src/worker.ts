@@ -104,12 +104,17 @@ const plugin = definePlugin({
     ctx.data.register(DATA_KEYS.certification, async (params) => {
       const companyId = typeof params?.companyId === "string" ? params.companyId.trim() : "";
       if (!companyId) throw new Error("Company scope is required");
+      // Register before awaiting config. Release this read before the synchronous
+      // start/close decision so it cannot overlap itself; other reads remain pending.
+      const endRead = requestStarted(companyId);
       let config: Record<string, unknown>;
       try { config = await ctx.config.get(companyId); }
       catch {
+        endRead();
         invalidateCertification(companyId, "config_unavailable");
         throw new Error("Ops snapshot configuration unavailable (fail closed)");
       }
+      endRead();
       if (config.certificationEnabled !== true) {
         invalidateCertification(companyId, "certification_disabled");
         throw new Error("Certification not enabled");

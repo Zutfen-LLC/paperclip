@@ -21,7 +21,7 @@ function serve(handler) {
   const server = http.createServer((req, res) => { seen.push({ method: req.method, url: req.url, headers: req.headers }); handler(req, res); });
   return new Promise(resolve => server.listen(0, '127.0.0.1', () => resolve({ seen, server,
     async close() { server.closeAllConnections(); await new Promise(done => server.close(done)); },
-    port: server.address().port }))); 
+    port: server.address().port })));
 }
 async function transport(fixture, fn) {
   const original = globalThis.fetch;
@@ -141,7 +141,7 @@ test('post-start snapshot config failure invalidates the window after request ex
   const closed = await h.read('config-failure', 'close');
   assert.equal(closed.status, 'incomplete');
   assert.equal(closed.incompleteReason, 'config_unavailable');
-  assert.equal(closed.inFlight, 0);
+  assert.equal(closed.inFlight, 1); // frozen when config failure invalidated the active request
   assert.equal(closed.counters.acceptedOrigin, 0);
   assert.equal(JSON.stringify(closed).includes(secret), false);
   assert.equal((await h.read('config-failure', 'start')).status, 'active');
@@ -246,7 +246,7 @@ test('opening during an earlier certification config read remains incomplete aft
   assert.equal(opened.incompleteReason, 'request_overlap');
   assert.equal(opened.inFlight, 1);
   release();
-  await assert.rejects(prior, /No certification window/);
+  assert.deepEqual(await prior, opened);
   assert.deepEqual(await h.read('prior-read', 'close'), opened);
 });
 

@@ -16,26 +16,31 @@ type Window = {
   incompleteReason?: IncompleteReason;
   events: number;
   counters: Record<Name, number>;
+  terminalInFlight?: number;
 };
 const windows = new Map<string, Window>();
 // Tracks requests even when not instrumented: opening a window mid-request cannot certify completeness.
 const pending = new Map<string, number>();
-function expire(window: Window) {
+function finish(window: Window, companyId: string, status: "complete" | "incomplete", reason?: IncompleteReason, endedAt = Date.now()) {
+  window.status = status;
+  window.incompleteReason = reason;
+  window.endedAt = endedAt;
+  window.terminalInFlight = pending.get(companyId) ?? 0;
+}
+function expire(window: Window, companyId: string) {
   if (window.status === "active" && Date.now() - window.startedAt >= WINDOW_MS) {
-    window.status = "incomplete";
-    window.incompleteReason = "window_expired";
-    window.endedAt = window.startedAt + WINDOW_MS;
+    finish(window, companyId, "incomplete", "window_expired", window.startedAt + WINDOW_MS);
   }
 }
 function receipt(window: Window, companyId: string) {
-  expire(window);
+  expire(window, companyId);
   return {
     schema: "ops_observer_certification_v1" as const,
     status: window.status,
     incompleteReason: window.incompleteReason ?? null,
     startedAt: window.startedAt,
     endedAt: window.endedAt ?? null,
-    inFlight: pending.get(companyId) ?? 0,
+    inFlight: window.terminalInFlight ?? (pending.get(companyId) ?? 0),
     counters: { ...window.counters },
     upstreamMethod: window.counters.upstreamGet > 0 ? "GET" as const : "none" as const,
     adapterAuthHeaderAttached: window.counters.adapterAuthAttached > 0,
@@ -44,24 +49,23 @@ function receipt(window: Window, companyId: string) {
 export function certificationWindow(companyId: string, command?: unknown) {
   if (command === "start") {
     const previous = windows.get(companyId);
-    if (previous) expire(previous);
+    if (previous) expire(previous, companyId);
     if (previous?.status === "active") throw new Error("Certification window already active");
     if (!previous && windows.size >= MAX_COMPANIES) throw new Error("Certification window capacity reached");
     const counters = Object.fromEntries(names.map(name => [name, 0])) as Record<Name, number>;
     const window: Window = { startedAt: Date.now(), status: "active", events: 0, counters };
     // An earlier request overlaps the start, so the entire window cannot be certified.
-    if ((pending.get(companyId) ?? 0) > 0) { window.status = "incomplete"; window.incompleteReason = "request_overlap"; window.endedAt = Date.now(); }
+    if ((pending.get(companyId) ?? 0) > 0) finish(window, companyId, "incomplete", "request_overlap");
     windows.set(companyId, window);
     return receipt(window, companyId);
   }
   if (command !== undefined && command !== "close") throw new Error("Invalid certification read command");
   const window = windows.get(companyId);
   if (!window) throw new Error("No certification window for company");
-  expire(window);
+  expire(window, companyId);
   if (command === "close" && window.status === "active") {
-    window.status = (pending.get(companyId) ?? 0) === 0 ? "complete" : "incomplete";
-    if (window.status === "incomplete") window.incompleteReason = "request_overlap";
-    window.endedAt = Date.now();
+    const overlaps = (pending.get(companyId) ?? 0) > 0;
+    finish(window, companyId, overlaps ? "incomplete" : "complete", overlaps ? "request_overlap" : undefined);
   }
   return receipt(window, companyId);
 }
@@ -70,26 +74,22 @@ export function certificationWindow(companyId: string, command?: unknown) {
 export function invalidateCertification(companyId: string, reason: "certification_disabled" | "config_unavailable") {
   const window = windows.get(companyId);
   if (!window) return;
-  expire(window);
+  expire(window, companyId);
   if (window.status !== "active") return;
-  window.status = "incomplete";
-  window.incompleteReason = reason;
-  window.endedAt = Date.now();
+  finish(window, companyId, "incomplete", reason);
 }
 export function observeRequest(companyId: string, enabled: boolean) {
   if (!enabled) invalidateCertification(companyId, "certification_disabled");
   const window = enabled ? windows.get(companyId) : undefined;
-  if (window) expire(window);
+  if (window) expire(window, companyId);
   const active = window?.status === "active" ? window : undefined;
   return {
     count(name: Name) {
       if (!active || active.status !== "active") return;
-      expire(active);
+      expire(active, companyId);
       if (active.status !== "active") return;
       if (active.events >= MAX_EVENTS) {
-        active.status = "incomplete";
-        active.incompleteReason = "event_limit";
-        active.endedAt = Date.now();
+        finish(active, companyId, "incomplete", "event_limit");
         return;
       }
       active.events++;
