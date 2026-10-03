@@ -11,7 +11,20 @@ from pathlib import Path
 from window_scanner import CATEGORIES, EvidenceError, MAX_SOURCE_BYTES, validate_cache_receipt
 
 
-def collect_inventory(export, destination):
+def collect_inventory(export, destination, manifest_path):
+    # The retained input is a source in its own right. Never reconstruct it
+    # from the validated object: unknown fields and original escapes matter.
+    if not isinstance(manifest_path, (str, os.PathLike)):
+        raise EvidenceError('export_manifest_required')
+    try:
+        with open(manifest_path, 'rb') as handle: manifest_raw = handle.read(1024 * 1024 + 1)
+        if not manifest_raw or len(manifest_raw) > 1024 * 1024:
+            raise EvidenceError('export_manifest_limit')
+        if json.loads(manifest_raw.decode('utf-8')) != export:
+            raise EvidenceError('export_manifest_mismatch')
+    except (OSError, UnicodeError, ValueError, RecursionError) as exc:
+        if isinstance(exc, EvidenceError): raise
+        raise EvidenceError('export_manifest_unavailable_or_invalid') from None
     if (not isinstance(export, dict) or export.get('schema') != 'ops_observer_export_v1'
         or not isinstance(export.get('sources'), dict) or set(export['sources']) != set(CATEGORIES)):
         raise EvidenceError('invalid_export_inventory')
@@ -51,7 +64,9 @@ def collect_inventory(export, destination):
     destination = Path(destination)
     destination.mkdir(mode=0o700, parents=True, exist_ok=False)
     inventory = {'schema': 'ops_observer_window_inventory_v1', 'window': window,
-                 'startedAt': start, 'endedAt': end, 'sources': {}}
+                 'startedAt': start, 'endedAt': end, 'sources': {},
+                 'exportManifest': {'path': str(manifest_path), 'bytes': len(manifest_raw),
+                                    'sha256': hashlib.sha256(manifest_raw).hexdigest()}}
     for category, text in captures.items():
         data = {'window': window, 'records': [
             {'seq': 0, 'at': start, 'kind': 'start', 'payload': {}},
@@ -62,8 +77,8 @@ def collect_inventory(export, destination):
         path = destination / (category + '.json')
         fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         with os.fdopen(fd, 'wb') as f: f.write(raw)
-        # The scanner needs fixed coverage booleans, not cursor strings; the
-        # original operator export manifest retains the independent attestation.
+        # Never copy arbitrary retained metadata into a new receipt. The
+        # scanner verifies and scans the original manifest by digest instead.
         coverage = export['sources'][category]['coverage']
         inventory['sources'][category] = {
             'path': str(path), 'bytes': len(raw), 'sha256': hashlib.sha256(raw).hexdigest(),
@@ -77,10 +92,11 @@ def main():
     try:
         if len(sys.argv) != 3: raise EvidenceError('usage')
         path = Path(sys.argv[1])
-        if path.stat().st_size > 1024 * 1024: raise EvidenceError('export_manifest_limit')
-        export = json.loads(path.read_text(encoding='utf-8'))
+        with open(path, 'rb') as handle: raw = handle.read(1024 * 1024 + 1)
+        if not raw or len(raw) > 1024 * 1024: raise EvidenceError('export_manifest_limit')
+        export = json.loads(raw.decode('utf-8'))
         destination = Path(sys.argv[2])
-        inventory = collect_inventory(export, destination)
+        inventory = collect_inventory(export, destination, path)
         output = destination / 'inventory.json'
         fd = os.open(output, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         with os.fdopen(fd, 'w', encoding='utf-8') as f: json.dump(inventory, f)

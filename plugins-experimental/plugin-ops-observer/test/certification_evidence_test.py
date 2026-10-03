@@ -232,6 +232,16 @@ class ScannerTests(unittest.TestCase):
         self.inventory['sources'][category] = {'path': str(path), 'sha256': hashlib.sha256(raw).hexdigest(),
            'bytes': len(raw), 'coverage': {'startedAt': 100, 'endedAt': 200, 'complete': True,
                                           'truncated': False, 'overflow': False, 'collector': 'isolated-fixture'}}
+        manifest = {'schema': 'ops_observer_export_v1', 'window': 'isolated-1',
+                    'startedAt': 100, 'endedAt': 200, 'sources': {}}
+        for key, source in self.inventory['sources'].items():
+            manifest['sources'][key] = {**{k: source[k] for k in ('path', 'bytes', 'sha256')},
+                'coverage': {**source['coverage'], 'startCursor': 'before', 'endCursor': 'after'}}
+        manifest_path = self.root / 'direct-manifest.json'
+        manifest_raw = json.dumps(manifest).encode()
+        manifest_path.write_bytes(manifest_raw)
+        self.inventory['exportManifest'] = {'path': str(manifest_path), 'bytes': len(manifest_raw),
+                                            'sha256': hashlib.sha256(manifest_raw).hexdigest()}
 
     def scan(self): return scan_inventory(self.inventory, [SECRET, LEAK])
 
@@ -255,13 +265,23 @@ class ScannerTests(unittest.TestCase):
         source['bytes'] = len(raw)
         source['sha256'] = hashlib.sha256(raw).hexdigest()
 
+    def collect(self, export, destination):
+        manifest_path = self.root / (destination.name + '-original.json')
+        manifest_path.write_text(json.dumps(export))
+        return collect_inventory(export, destination, manifest_path)
+
     def test_retained_original_manifest_all_fields_raw_and_decoded_no_echo(self):
         escaped = ''.join('\\u%04x' % ord(char) for char in SECRET)
-        for field in ('startCursor', 'endCursor', 'unexpectedMetadata'):
+        for field in ('startCursor', 'endCursor', 'unexpectedMetadata', 'sourceMetadata', 'topLevelMetadata'):
             for encoding in ('plain', 'escaped'):
                 with self.subTest(field=field, encoding=encoding):
                     export = self.export_manifest()
-                    export['sources']['worker_logs']['coverage'][field] = SECRET
+                    if field == 'topLevelMetadata':
+                        export[field] = SECRET
+                    elif field == 'sourceMetadata':
+                        export['sources']['worker_logs'][field] = SECRET
+                    else:
+                        export['sources']['worker_logs']['coverage'][field] = SECRET
                     manifest = self.root / ('manifest-' + field + '-' + encoding + '.json')
                     raw = json.dumps(export).replace(SECRET, escaped if encoding == 'escaped' else SECRET)
                     manifest.write_text(raw)
@@ -291,6 +311,16 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(scan_inventory(inventory, [SECRET])['status'], 'clean')
         manifest.write_text(json.dumps(export) + ' ')
         with self.assertRaises(EvidenceError): scan_inventory(inventory, [SECRET])
+        scanner = subprocess.run([sys.executable, '-B', str(ROOT / 'certification' / 'window_scanner.py'),
+                                  str(destination / 'inventory.json')], input=json.dumps({'values': [SECRET]}),
+                                 text=True, capture_output=True, timeout=5)
+        self.assertEqual(scanner.returncode, 2)
+        self.assertNotIn(str(manifest), scanner.stdout + scanner.stderr)
+        self.assertNotIn(SECRET, scanner.stdout + scanner.stderr)
+        manifest.write_text(json.dumps(export))
+        original_source = Path(export['sources']['worker_logs']['path'])
+        original_source.write_bytes(original_source.read_bytes() + b' ')
+        with self.assertRaises(EvidenceError): scan_inventory(inventory, [SECRET])
         manifest.unlink()
         with self.assertRaises(EvidenceError): scan_inventory(inventory, [SECRET])
         inventory.pop('exportManifest', None)
@@ -310,7 +340,7 @@ class ScannerTests(unittest.TestCase):
                     if category == 'worker_logs':
                         raw = b'{"event":"ordinary"}\n' + raw + b'\n'
                 self.replace_export(export, category, raw)
-                inventory = collect_inventory(export, self.root / ('escaped-' + category))
+                inventory = self.collect(export, self.root / ('escaped-' + category))
                 result = scan_inventory(inventory, [SECRET])
                 self.assertEqual(result['status'], 'leak')
                 self.assertGreater(result['categories'][category]['matches'], 0)
@@ -320,22 +350,16 @@ class ScannerTests(unittest.TestCase):
         export = self.export_manifest()
         self.replace_export(export, 'errors', json.dumps(SECRET).encode())
         export['sources']['worker_logs']['coverage']['collector'] = SECRET
-        inventory = collect_inventory(export, self.root / 'metadata')
+        inventory = self.collect(export, self.root / 'metadata')
         result = scan_inventory(inventory, [SECRET])
         self.assertEqual(result['status'], 'leak')
         self.assertNotIn(SECRET, json.dumps(result))
         inventory['sources']['worker_logs']['coverage']['collector'] = 'operator-export'
-        self.assertEqual(scan_inventory(inventory, [SECRET])['status'], 'leak')
+        with self.assertRaises(EvidenceError): scan_inventory(inventory, [SECRET])
         self.replace_export(export, 'errors', b'{"safe":true}')
-        clean = collect_inventory(export, self.root / 'window-meta')
-        clean['window'] = ''.join('\\u%04x' % ord(c) for c in SECRET)
-        for category in CATEGORIES:
-            source = clean['sources'][category]
-            data = json.loads(Path(source['path']).read_text())
-            data['window'] = clean['window']
-            raw = json.dumps(data).encode()
-            Path(source['path']).write_bytes(raw)
-            source['bytes'], source['sha256'] = len(raw), hashlib.sha256(raw).hexdigest()
+        export['sources']['worker_logs']['coverage']['collector'] = 'operator-export'
+        export['window'] = ''.join('\\u%04x' % ord(c) for c in SECRET)
+        clean = self.collect(export, self.root / 'window-meta')
         self.assertEqual(scan_inventory(clean, [SECRET])['status'], 'leak')
 
     def test_allowed_worker_receipt_metadata_private_value_is_not_clean(self):
@@ -349,7 +373,7 @@ class ScannerTests(unittest.TestCase):
     def test_collector_private_coverage_metadata_and_unexpected_receipt_fields(self):
         export = self.export_manifest()
         export['sources']['worker_logs']['coverage']['collector'] = SECRET
-        inventory = collect_inventory(export, self.root / 'collector-private')
+        inventory = self.collect(export, self.root / 'collector-private')
         result = scan_inventory(inventory, [SECRET])
         self.assertEqual(result['status'], 'leak')
         self.assertGreater(result['categories']['worker_logs']['matches'], 0)
@@ -363,7 +387,7 @@ class ScannerTests(unittest.TestCase):
         for index, raw in enumerate((b'{"event":"\\u0070"', b'[' * 64 + b'0' + b']' * 64)):
             export = self.export_manifest()
             self.replace_export(export, 'worker_logs', raw)
-            inventory = collect_inventory(export, self.root / ('malformed-' + str(index)))
+            inventory = self.collect(export, self.root / ('malformed-' + str(index)))
             with self.assertRaises(EvidenceError) as ctx:
                 scan_inventory(inventory, [SECRET])
             self.assertNotIn(raw.decode(), str(ctx.exception))
@@ -497,25 +521,25 @@ class ScannerTests(unittest.TestCase):
               'sha256': hashlib.sha256(raw).hexdigest(), 'coverage': {
                 'startedAt': 100, 'endedAt': 200, 'complete': True, 'truncated': False,
                 'overflow': False, 'collector': 'operator-export', 'startCursor': 'before', 'endCursor': 'after'}}
-        result = collect_inventory(export, self.root / 'collected')
+        result = self.collect(export, self.root / 'collected')
         self.assertEqual(scan_inventory(result, [SECRET])['status'], 'clean')
         fake = (self.root / 'raw-cache_identifiers')
         forged = b'{"status":"clean"}'
         fake.write_bytes(forged)
         export['sources']['cache_identifiers']['bytes'] = len(forged)
         export['sources']['cache_identifiers']['sha256'] = hashlib.sha256(forged).hexdigest()
-        with self.assertRaises(EvidenceError): collect_inventory(export, self.root / 'fake-cache')
+        with self.assertRaises(EvidenceError): self.collect(export, self.root / 'fake-cache')
         proper = json.dumps(self.cache_receipt()).encode()
         fake.write_bytes(proper)
         export['sources']['cache_identifiers']['bytes'] = len(proper)
         export['sources']['cache_identifiers']['sha256'] = hashlib.sha256(proper).hexdigest()
         export['sources']['worker_logs']['coverage']['startCursor'] = ''
-        with self.assertRaises(EvidenceError): collect_inventory(export, self.root / 'bad')
+        with self.assertRaises(EvidenceError): self.collect(export, self.root / 'bad')
         export['sources']['worker_logs']['coverage']['startCursor'] = 'before'
         (self.root / 'raw-worker_logs').write_bytes(b'Z' * export['sources']['worker_logs']['bytes'])
-        with self.assertRaises(EvidenceError): collect_inventory(export, self.root / 'changed')
+        with self.assertRaises(EvidenceError): self.collect(export, self.root / 'changed')
         (self.root / 'raw-worker_logs').write_bytes(b'X' * (4 * 1024 * 1024 + 1))
-        with self.assertRaises(EvidenceError): collect_inventory(export, self.root / 'overflow')
+        with self.assertRaises(EvidenceError): self.collect(export, self.root / 'overflow')
 
     def test_marker_race_and_finite_limit_refused(self):
         source = self.inventory['sources']['telemetry']

@@ -24,8 +24,9 @@ WORKER_COUNTER_FIELDS = frozenset(('acceptedOrigin', 'rejectedOrigin',
     'cacheHits', 'cacheMisses', 'cacheRefreshes', 'fetchAttempts',
     'fetchSuccesses', 'fetchFailures', 'redirectRefusals', 'upstreamGet',
     'adapterAuthAttached'))
-INVENTORY_FIELDS = frozenset(('schema', 'window', 'startedAt', 'endedAt', 'sources'))
+INVENTORY_FIELDS = frozenset(('schema', 'window', 'startedAt', 'endedAt', 'sources', 'exportManifest'))
 SOURCE_FIELDS = frozenset(('path', 'bytes', 'sha256', 'coverage'))
+MANIFEST_REFERENCE_FIELDS = frozenset(('path', 'bytes', 'sha256'))
 COVERAGE_FIELDS = frozenset(('startedAt', 'endedAt', 'complete', 'truncated', 'overflow', 'collector'))
 UNICODE_ESCAPE = re.compile(r'\\u[0-9a-fA-F]{4}')
 
@@ -127,6 +128,21 @@ def _export_matches(text, patterns):
             _reject('invalid_export_json')
     return max(_matches(text, patterns), sum(_matches(doc, patterns) for doc in documents))
 
+def _read_verified(reference, limit, reason):
+    if (not isinstance(reference, dict) or set(reference) != MANIFEST_REFERENCE_FIELDS
+        or not isinstance(reference.get('path'), str) or not reference['path']
+        or type(reference.get('bytes')) is not int or not 1 <= reference['bytes'] <= limit
+        or not isinstance(reference.get('sha256'), str) or len(reference['sha256']) != 64
+        or any(c not in '0123456789abcdef' for c in reference['sha256'])):
+        _reject(reason)
+    try:
+        with open(reference['path'], 'rb') as handle: raw = handle.read(limit + 1)
+    except OSError:
+        _reject(reason)
+    if len(raw) != reference['bytes'] or hashlib.sha256(raw).hexdigest() != reference['sha256']:
+        _reject(reason)
+    return raw
+
 
 def scan_inventory(inventory, values, *, max_source_bytes=MAX_SOURCE_BYTES, max_records=MAX_RECORDS):
     """Require every category's digest, size, coverage and ordered start/end markers."""
@@ -155,6 +171,22 @@ def scan_inventory(inventory, values, *, max_source_bytes=MAX_SOURCE_BYTES, max_
         _reject('invalid_inventory')
     if len(metadata_bytes) > 1024 * 1024:
         _reject('inventory_limit')
+    manifest_raw = _read_verified(inventory['exportManifest'], 1024 * 1024, 'export_manifest_integrity')
+    try:
+        manifest_text = manifest_raw.decode('utf-8')
+        original = json.loads(manifest_text)
+    except (UnicodeError, ValueError, RecursionError):
+        _reject('invalid_export_manifest')
+    if (not isinstance(original, dict) or original.get('schema') != 'ops_observer_export_v1'
+        or original.get('window') != window or original.get('startedAt') != start
+        or original.get('endedAt') != end or not isinstance(original.get('sources'), dict)
+        or set(original['sources']) != set(CATEGORIES)):
+        _reject('export_manifest_mismatch')
+    # Include every original field, even fields the collector intentionally
+    # does not carry into its sanitized inventory. Check original raw bytes,
+    # parsed JSON, and the scanner's bounded Unicode-escape layer.
+    manifest_matches = max(sum(manifest_raw.count(p) for p in patterns),
+                           _matches(manifest_text, patterns), _matches(original, patterns))
     window_matches = _matches(window, patterns)
     categories = {}
     for category in CATEGORIES:
@@ -167,6 +199,18 @@ def scan_inventory(inventory, values, *, max_source_bytes=MAX_SOURCE_BYTES, max_
             or coverage.get('truncated') is not False or coverage.get('overflow') is not False
             or not isinstance(coverage.get('collector'), str) or not coverage['collector']):
             _reject('incomplete_coverage')
+        original_source = original['sources'][category]
+        if not isinstance(original_source, dict) or not isinstance(original_source.get('coverage'), dict):
+            _reject('export_manifest_mismatch')
+        original_coverage = original_source['coverage']
+        if (any(original_coverage.get(key) != coverage[key] for key in COVERAGE_FIELDS)
+            or any(not isinstance(original_coverage.get(key), str) or not original_coverage[key]
+                   for key in ('startCursor', 'endCursor'))):
+            _reject('export_manifest_mismatch')
+        original_raw = _read_verified({key: original_source.get(key) for key in MANIFEST_REFERENCE_FIELDS},
+                                      max_source_bytes, 'export_source_integrity')
+        try: original_text = original_raw.decode('utf-8')
+        except UnicodeError: _reject('invalid_export_encoding')
         size, digest, path = source.get('bytes'), source.get('sha256'), source.get('path')
         if (type(size) is not int or not 1 <= size <= max_source_bytes or
             not isinstance(digest, str) or len(digest) != 64 or
@@ -182,6 +226,13 @@ def scan_inventory(inventory, values, *, max_source_bytes=MAX_SOURCE_BYTES, max_
         if not isinstance(data, dict) or data.get('window') != window or not isinstance(data.get('records'), list):
             _reject('invalid_records')
         records = data['records']
+        # Collector wraps the exact original UTF-8 export; direct scanner
+        # inventories may point both references at the same unwrapped source.
+        if original_raw != raw:
+            if (len(records) != 3 or not isinstance(records[1], dict)
+                or not isinstance(records[1].get('payload'), dict)
+                or records[1]['payload'].get('export') != original_text):
+                _reject('export_source_mismatch')
         if category == 'cache_identifiers':
             if len(records) != 3 or not isinstance(records[1], dict):
                 _reject('cache_receipt_required')
@@ -199,7 +250,7 @@ def scan_inventory(inventory, values, *, max_source_bytes=MAX_SOURCE_BYTES, max_
             or records[0].get('at') != start or records[-1].get('at') != end):
             _reject('marker_mismatch')
         last_at = start
-        metadata_matches = _matches(source, patterns) + (window_matches if category == CATEGORIES[0] else 0)
+        metadata_matches = _matches(source, patterns) + (window_matches + manifest_matches if category == CATEGORIES[0] else 0)
         export_matches = 0
         for index, record in enumerate(records):
             if not isinstance(record, dict): _reject('invalid_record')
@@ -218,7 +269,8 @@ def scan_inventory(inventory, values, *, max_source_bytes=MAX_SOURCE_BYTES, max_
         # Whole raw source also includes metadata and JSON-escaped representation.
         # Count raw matches not already represented by decoded nested payload scan.
         raw_matches = sum(raw.count(value) for value in patterns)
-        matches = metadata_matches + max(raw_matches, _matches(data, patterns), export_matches)
+        matches = metadata_matches + max(raw_matches, _matches(data, patterns), export_matches,
+                                         _export_matches(original_text, patterns))
         categories[category] = {'matches': matches, 'records': len(records), 'bytes': size, 'sha256': digest}
     return {'schema': 'ops_observer_hygiene_v1', 'status': 'leak' if any(v['matches'] for v in categories.values()) else 'clean',
             'categories': categories}

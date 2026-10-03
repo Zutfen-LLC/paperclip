@@ -283,6 +283,11 @@ plaintext absence.
    It checks input byte counts/digests and bounds, wraps complete exports in
    start/data/end sequence records, writes mode-0600 files plus
    `<new-private-output-dir>/inventory.json`, and never prints input contents.
+   The inventory includes only the original manifest's path, byte count and
+   SHA-256, not copied cursor or extension values. Keep that original file at
+   its path, unchanged and private, through the scan; it is a required ninth
+   retained source. A missing, changed, oversized or omitted manifest is
+   incomplete, never clean.
    Then run `python3 certification/window_scanner.py <new-private-output-dir>/inventory.json < <private-values.json>`.
    The stdin JSON is `{ "values": ["<actual-token>", "<actual-secret>",
    "<actual-sensitive-header-value>"] }`; create it privately from the
@@ -293,12 +298,16 @@ plaintext absence.
    inventory. CLI stdout contains only fixed classifications, counts, category
    names, byte counts and digests; it does not echo paths, matches or values.
 
-Scanner bounds: eight mandatory sources, each <=4 MiB / 10,000 ordered records,
+Scanner bounds: eight mandatory sink sources plus the <=1 MiB original manifest,
+each sink <=4 MiB / 10,000 ordered records,
 all contiguous sequence numbers, start/data/end markers and time bounds,
 source SHA-256/byte equality, no missing or false-complete flags, <=32 private
 values of <=4 KiB each. It scans raw UTF-8 bytes, decoded JSON documents and
 newline-delimited JSON exports (including one bounded Unicode-escape layer),
-and all retained inventory/coverage metadata. Malformed JSON-looking exports,
+and all retained inventory/coverage metadata and every field of the verified
+original manifest (including cursor and unexpected metadata) in raw and
+decoded form. It rechecks the original manifest's and source files' bytes and
+digests and their linkage to wrapped exports. Malformed JSON-looking exports,
 excessive nesting, and unexpected inventory fields return incomplete rather
 than clean; opaque non-JSON text is scanned as text. It reports no snippets.
 The digest/marker validation proves integrity of
