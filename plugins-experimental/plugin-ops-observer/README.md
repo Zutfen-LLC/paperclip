@@ -65,14 +65,53 @@ then verifies the exact origin and root path. No hostname lookup/DNS alias is
 needed for the authorized numeric address.
 
 The only request is `GET http://127.0.0.1:18487/snapshot` with the adapter bearer.
-Native fetch uses `redirect: "error"`: ALL redirects, including same-origin ones,
-fail closed without a second request. Error diagnostics do not include rejected
+Native fetch uses `redirect: "manual"`: all 3xx responses are classified as
+redirect refusals without reading `Location` or issuing a second request.
+Error diagnostics do not include rejected
 URLs, token values, or underlying fetch/secret exceptions. The boundary assumes
 the operator controls the process/tunnel listening at this exact loopback port;
 origin pinning is not server authentication against a compromised local host.
 HTTP is intentional for this dedicated local tunnel, not permission to transmit
 the credential to other HTTP services. Legacy raw tokens are still supported
 with the same destination gate and the plaintext-config caveat below.
+
+## Opt-in certification evidence (slice A)
+
+The manifest's optional company config `certificationEnabled: true` enables
+**process-local** counters. Default/absent/false is off; it neither adds data to
+normal `ops-snapshot` envelopes nor emits outbound telemetry. An authorized board
+caller uses the existing scoped plugin data bridge:
+
+- `POST /api/plugins/<plugin-id>/data/ops-certification` with
+  `{ "companyId": "<authorized-company-uuid>", "params": { "command": "start" } }`
+  begins a five-minute window *before* sending measured snapshot requests.
+- The same route and companyId with `params: {}` reads a live receipt; with
+  `params: { "command": "close" }` closes it. Response is `{ "data": receipt }`.
+  This is a getData read bridge, **not** a new action, capability, or write API.
+- `status: "complete"` only when explicitly closed before expiry, without
+  overlapping requests. `status: "active"` is not final evidence;
+  `status: "incomplete"` means an in-flight request overlapped close/start, the
+  five-minute limit expired, or the 10,000-event budget overflowed. Never call
+  an incomplete receipt a full-window result. In-flight requests begun before
+  `start` invalidate that window. Re-reading a closed receipt is supported until
+  replaced by another start or worker restart; the worker retains at most one
+  receipt per company and at most 64 companies per process. A restart loses
+  this volatile evidence; there is no persistent receipt store.
+
+Receipt shape: `schema`, `status`, `startedAt`, `endedAt` (number/null),
+`inFlight`, `counters`, `upstreamMethod` (`GET`/`none`), and
+`adapterAuthHeaderAttached` (boolean). Counters: `acceptedOrigin`,
+`rejectedOrigin`, `secretResolutionAttempts`, `secretResolutionFailures`,
+`cacheReads`, `cacheHits`, `cacheMisses`, `cacheRefreshes`, `fetchAttempts`,
+`fetchSuccesses`, `fetchFailures`, `redirectRefusals`, `upstreamGet`,
+`adapterAuthAttached`. Method and header classification are set at the
+worker's sole fetch boundary, after the destination/credential gates; caller
+headers are never passed to fetch. These are finite classifications/counters,
+not header values, tokens, secret IDs, raw URLs, bodies, or cache keys. The
+worker does not print fetch/secret exceptions. **Slice B** must independently
+scan the entire installed-worker/adapter log and receipt interval for secret
+hygiene; this worker receipt alone cannot certify external logs or deployed
+adapter behavior. Certification is not a production rollout.
 
 ## Cache
 

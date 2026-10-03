@@ -1,6 +1,7 @@
 import { definePlugin, runWorker } from "@paperclipai/plugin-sdk";
 import type { EnvSecretRefBinding } from "@paperclipai/plugin-sdk";
 import { CACHE_TTL_MS, DATA_KEYS } from "./constants.js";
+import { certificationWindow, observeRequest, requestStarted } from "./certification.js";
 
 /**
  * Ops Supervisor read-only observer worker.
@@ -68,75 +69,109 @@ function isFresh(entry: CachedEntry): boolean {
   return Date.now() - entry.fetchedAt < CACHE_TTL_MS;
 }
 
-async function fetchSnapshot(baseUrl: string, token: string): Promise<unknown> {
+async function fetchSnapshot(baseUrl: string, token: string, count: (name: "fetchAttempts" | "fetchSuccesses" | "fetchFailures" | "redirectRefusals" | "upstreamGet" | "adapterAuthAttached") => void): Promise<unknown> {
   const url = `${baseUrl.replace(/\/+$/, "")}/snapshot`;
-  // GET only. This is the only fetch in the plugin.
-  const response = await fetch(url, {
-    method: "GET",
-    // Never follow even same-origin redirects: the only authorized route is /snapshot.
-    redirect: "error",
-    headers: { Authorization: `Bearer ${token}` },
-  });
-  if (!response.ok) {
-    throw new Error(`adapter responded ${response.status} (fail closed)`);
+  // Construct exactly one GET with a worker-owned header; caller headers are ignored.
+  count("fetchAttempts");
+  count("upstreamGet");
+  count("adapterAuthAttached");
+  try {
+    const response = await fetch(url, {
+      method: "GET",
+      // Manual mode exposes 3xx status without following or examining Location.
+      redirect: "manual",
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (response.status >= 300 && response.status < 400) {
+      count("redirectRefusals");
+      throw new Error("adapter redirect refused (fail closed)");
+    }
+    if (!response.ok) throw new Error(`adapter responded ${response.status} (fail closed)`);
+    const parsed: unknown = await response.json();
+    if (typeof parsed !== "object" || parsed === null) throw new Error("adapter returned non-object payload (fail closed)");
+    if ((parsed as Record<string, unknown>).schema !== "ops_work_snapshot_v1") throw new Error("unexpected snapshot schema (fail closed)");
+    count("fetchSuccesses");
+    return parsed;
+  } catch {
+    count("fetchFailures");
+    throw new Error("Ops snapshot request failed (fail closed)");
   }
-  const parsed: unknown = await response.json();
-  if (typeof parsed !== "object" || parsed === null) {
-    throw new Error("adapter returned non-object payload (fail closed)");
-  }
-  const obj = parsed as Record<string, unknown>;
-  if (obj.schema !== "ops_work_snapshot_v1") {
-    throw new Error("unexpected snapshot schema (fail closed)");
-  }
-  return parsed;
 }
 
 const plugin = definePlugin({
   async setup(ctx) {
     // no events, no jobs, no webhooks, no actions: observation is pull-only
-    ctx.data.register(DATA_KEYS.snapshot, async (params) => {
+    ctx.data.register(DATA_KEYS.certification, async (params) => {
       const companyId = typeof params?.companyId === "string" ? params.companyId.trim() : "";
       if (!companyId) throw new Error("Company scope is required");
       let config: Record<string, unknown>;
+      try { config = await ctx.config.get(companyId); }
+      catch { throw new Error("Ops snapshot configuration unavailable (fail closed)"); }
+      if (config.certificationEnabled !== true) throw new Error("Certification not enabled");
+      return certificationWindow(companyId, params?.command);
+    });
+    ctx.data.register(DATA_KEYS.snapshot, async (params) => {
+      const companyId = typeof params?.companyId === "string" ? params.companyId.trim() : "";
+      if (!companyId) throw new Error("Company scope is required");
+      const endRequest = requestStarted(companyId);
+      let evidence: ReturnType<typeof observeRequest> | undefined;
       try {
-        config = await ctx.config.get(companyId);
-      } catch {
-        throw new Error("Ops snapshot configuration unavailable (fail closed)");
-      }
-      const baseUrl = normalizedBaseUrl(config.adapterBaseUrl);
-      const tokenRef = config.adapterToken;
-      let token: string;
-      try {
-        token = isSecretRefBinding(tokenRef)
-          ? await ctx.secrets.resolve(tokenRef, { companyId, configPath: "adapterToken" })
-          : requireString(tokenRef, "adapterToken");
-      } catch {
-        throw new Error("Ops snapshot credential unavailable (fail closed)");
-      }
-      const cacheKey = JSON.stringify([companyId, baseUrl]);
-
-      const cached = cache.get(cacheKey);
-      if (cached && isFresh(cached)) {
-        const envelope: SnapshotEnvelope = {
-          cached: true,
-          fetchedAt: cached.fetchedAt,
-          snapshot: cached.snapshot,
-        };
-        return envelope;
-      }
-
-      try {
-        const snapshot = await fetchSnapshot(baseUrl, token);
-        const entry: CachedEntry = { fetchedAt: Date.now(), snapshot };
-        cache.set(cacheKey, entry);
-        const envelope: SnapshotEnvelope = {
-          fetchedAt: entry.fetchedAt,
-          snapshot: entry.snapshot,
-        };
-        return envelope;
-      } catch {
-        // Never forward fetch/runtime exception text: it can contain request headers.
-        throw new Error("Ops snapshot request failed (fail closed)");
+        let config: Record<string, unknown>;
+        try {
+          config = await ctx.config.get(companyId);
+        } catch {
+          throw new Error("Ops snapshot configuration unavailable (fail closed)");
+        }
+        evidence = observeRequest(companyId, config.certificationEnabled === true);
+        // The destination gate MUST precede credential and cache access.
+        let baseUrl: string;
+        try { baseUrl = normalizedBaseUrl(config.adapterBaseUrl); }
+        catch {
+          evidence.count("rejectedOrigin");
+          if (config.adapterBaseUrl === undefined || config.adapterBaseUrl === "") throw new Error("Missing required config: adapterBaseUrl");
+          throw new Error("Invalid adapterBaseUrl: destination not approved (fail closed)");
+        }
+        evidence.count("acceptedOrigin");
+        const tokenRef = config.adapterToken;
+        const resolveBinding = isSecretRefBinding(tokenRef);
+        let token: string;
+        if (resolveBinding) evidence.count("secretResolutionAttempts");
+        try {
+          token = resolveBinding
+            ? await ctx.secrets.resolve(tokenRef, { companyId, configPath: "adapterToken" })
+            : requireString(tokenRef, "adapterToken");
+        } catch {
+          if (resolveBinding) evidence.count("secretResolutionFailures");
+          throw new Error("Ops snapshot credential unavailable (fail closed)");
+        }
+        const cacheKey = JSON.stringify([companyId, baseUrl]);
+        evidence.count("cacheReads");
+        const cached = cache.get(cacheKey);
+        if (cached && isFresh(cached)) {
+          evidence.count("cacheHits");
+          const envelope: SnapshotEnvelope = {
+            cached: true,
+            fetchedAt: cached.fetchedAt,
+            snapshot: cached.snapshot,
+          };
+          return envelope;
+        }
+        evidence.count(cached ? "cacheRefreshes" : "cacheMisses");
+        try {
+          const snapshot = await fetchSnapshot(baseUrl, token, evidence.count);
+          const entry: CachedEntry = { fetchedAt: Date.now(), snapshot };
+          cache.set(cacheKey, entry);
+          const envelope: SnapshotEnvelope = {
+            fetchedAt: entry.fetchedAt,
+            snapshot: entry.snapshot,
+          };
+          return envelope;
+        } catch {
+          // Never forward fetch/runtime exception text: it can contain request headers.
+          throw new Error("Ops snapshot request failed (fail closed)");
+        }
+      } finally {
+        endRequest();
       }
     });
   },

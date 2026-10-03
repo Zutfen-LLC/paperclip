@@ -9,6 +9,7 @@ export const EXPORT_NAMES = {
 } as const;
 export const DATA_KEYS = {
   snapshot: "ops-snapshot",
+  certification: "ops-certification",
 } as const;
 /** Read-through cache TTL (ms). Source remains Ops; stale is marked stale. */
 export const CACHE_TTL_MS = 30_000;

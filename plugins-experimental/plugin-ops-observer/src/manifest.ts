@@ -46,6 +46,12 @@ const manifest: PaperclipPluginManifestV1 = {
           "Pinned destination: http://127.0.0.1:18487 (optional single root slash). No other origins, paths, or redirects are authorized; GET /snapshot only.",
         default: "http://127.0.0.1:18487",
       },
+      certificationEnabled: {
+        type: "boolean",
+        title: "Enable bounded certification counters",
+        description: "Opt-in per-company worker-only read evidence (five-minute limit); no outbound telemetry.",
+        default: false,
+      },
       adapterToken: {
         ...envBindingSecretRefJsonSchema,
         title: "Read-only adapter bearer token",

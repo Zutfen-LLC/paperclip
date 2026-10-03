@@ -102,9 +102,43 @@ test('disabled configuration cannot start or read telemetry and does not change 
   const fixture = await serve((_req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(snapshot)); });
   await transport(fixture, async () => { assert.deepEqual(Object.keys(await h.get('disabled')).sort(), ['fetchedAt', 'snapshot']); });
 });
+test('bounded receipt and full fixture window remain free of credentials and header values', async () => {
+  cache.clear();
+  const fixture = await serve((_req, res) => { res.writeHead(502, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: secret })); });
+  const h = harness();
+  const errors = [];
+  try { await transport(fixture, async () => {
+    await h.read('hygiene', 'start');
+    for (const suffix of ['first', 'second']) {
+      try { await h.get('hygiene', { headers: { Authorization: `caller-${suffix}-header-do-not-emit` } }); }
+      catch (err) { errors.push(err.message); }
+    }
+    const receipt = await h.read('hygiene', 'close');
+    assert.equal(receipt.counters.fetchFailures, 2);
+    const completeWindow = JSON.stringify({ receipt, errors, logs: h.logs, cacheKeys: [...cache.keys()], cacheValues: [...cache.values()] });
+    for (const sentinel of [secret, binding.secretId, 'caller-first-header-do-not-emit', 'caller-second-header-do-not-emit']) {
+      assert.equal(completeWindow.includes(sentinel), false);
+    }
+  }); } finally { /* transport closes the fixture */ }
+});
+
+test('closing during configuration lookup cannot claim a complete window', async () => {
+  cache.clear(); let release;
+  const h = harness(() => new Promise(resolve => { release = () => resolve(config); }));
+  // Start normally, then hold only the snapshot config read.
+  const initial = harness();
+  await initial.read('pending-config', 'start');
+  const request = h.get('pending-config');
+  const receipt = await initial.read('pending-config', 'close');
+  assert.equal(receipt.status, 'incomplete');
+  assert.equal(receipt.inFlight, 1);
+  release();
+  await assert.rejects(request, /fail closed/);
+});
+
 test('concurrent close is incomplete and bounded window expires incomplete', async () => {
   cache.clear(); let release;
-  const fixture = await serve((_req, res) => { release = () => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(snapshot)); }; });
+  const fixture = await serve((_req, res) => { release = () => { if (!res.headersSent) { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(snapshot)); } }; });
   const h = harness();
   try { await transport(fixture, async () => {
     await h.read('concurrent', 'start');
