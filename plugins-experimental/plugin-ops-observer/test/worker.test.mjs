@@ -120,7 +120,7 @@ function startFakeAdapter(opts = {}) {
       globalThis.fetch = (url, options) => {
         assert.equal(url, "http://127.0.0.1:18487/snapshot");
         assert.equal(options.method, "GET");
-        assert.equal(options.redirect, "error");
+        assert.equal(options.redirect, "manual");
         return originalFetch(`http://127.0.0.1:${server.address().port}/snapshot`, options);
       };
       const originalClose = server.close.bind(server);

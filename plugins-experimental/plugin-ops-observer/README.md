@@ -65,14 +65,63 @@ then verifies the exact origin and root path. No hostname lookup/DNS alias is
 needed for the authorized numeric address.
 
 The only request is `GET http://127.0.0.1:18487/snapshot` with the adapter bearer.
-Native fetch uses `redirect: "error"`: ALL redirects, including same-origin ones,
-fail closed without a second request. Error diagnostics do not include rejected
+Native fetch uses `redirect: "manual"`: all 3xx responses are classified as
+redirect refusals without reading `Location` or issuing a second request.
+Error diagnostics do not include rejected
 URLs, token values, or underlying fetch/secret exceptions. The boundary assumes
 the operator controls the process/tunnel listening at this exact loopback port;
 origin pinning is not server authentication against a compromised local host.
 HTTP is intentional for this dedicated local tunnel, not permission to transmit
 the credential to other HTTP services. Legacy raw tokens are still supported
 with the same destination gate and the plaintext-config caveat below.
+
+## Opt-in certification evidence (slice A)
+
+The manifest's optional company config `certificationEnabled: true` enables
+**process-local** counters. Default/absent/false is off; it neither adds data to
+normal `ops-snapshot` envelopes nor emits outbound telemetry. An authorized board
+caller uses the existing scoped plugin data bridge:
+
+- `POST /api/plugins/<plugin-id>/data/ops-certification` with
+  `{ "companyId": "<authorized-company-uuid>", "params": { "command": "start" } }`
+  begins a five-minute window *before* sending measured snapshot requests.
+- The same route and companyId with `params: {}` reads a live receipt; with
+  `params: { "command": "close" }` closes it. Response is `{ "data": receipt }`.
+  This is a getData read bridge, **not** a new action, capability, or write API.
+- `status: "complete"` only when explicitly closed before expiry, without
+  overlapping requests (snapshot work or certification config lookups). A
+  certification read releases its own config lookup before the synchronous
+  start/close decision, while unresolved earlier same-company reads still
+  prevent completion. `status: "active"` is not final evidence;
+  `status: "incomplete"` means an in-flight request overlapped close/start, the
+  five-minute limit expired, the 10,000-event budget overflowed, or config was
+  unavailable/disabled during an active window (whether observed by snapshot
+  or certification read). Disable then re-enable cannot restore that window;
+  a fresh `start` is required after invalidation. Never call
+  an incomplete receipt a full-window result. In-flight requests begun before
+  `start` invalidate that window. Re-reading a closed receipt is supported until
+  replaced by another start or worker restart; the worker retains at most one
+  receipt per company and at most 64 companies per process. A restart loses
+  this volatile evidence; there is no persistent receipt store.
+
+Receipt shape: `schema`, `status`, `incompleteReason` (null or one of
+`request_overlap`, `window_expired`, `event_limit`, `certification_disabled`,
+`config_unavailable`, `cache_identifier_hygiene`, `cache_inventory_limit`), `startedAt`, `endedAt` (number/null),
+`inFlight`, `counters`, `cacheIdentifiers`, `upstreamMethod` (`GET`/`none`), and
+`adapterAuthHeaderAttached` (boolean). `inFlight` is live only for an active
+window; terminal receipts freeze its value at closure or invalidation and do
+not reflect later requests. Counters: `acceptedOrigin`,
+`rejectedOrigin`, `secretResolutionAttempts`, `secretResolutionFailures`,
+`cacheReads`, `cacheHits`, `cacheMisses`, `cacheRefreshes`, `fetchAttempts`,
+`fetchSuccesses`, `fetchFailures`, `redirectRefusals`, `upstreamGet`,
+`adapterAuthAttached`. Method and header classification are set at the
+worker's sole fetch boundary, after the destination/credential gates; caller
+headers are never passed to fetch. These are finite classifications/counters,
+not header values, tokens, secret IDs, raw URLs, bodies, or cache keys. The
+worker does not print fetch/secret exceptions. **Slice B** must independently
+scan the entire installed-worker/adapter log and receipt interval for secret
+hygiene; this worker receipt alone cannot certify external logs or deployed
+adapter behavior. Certification is not a production rollout.
 
 ## Cache
 
@@ -114,6 +163,167 @@ the worker policy itself is never widened for testing.
 `test/worker.test.mjs` retains GET-only, company-isolated cache, TTL refresh,
 failed-refresh fail-closed, company-scoped secret resolution, token hygiene,
 no-actions, and provenance regressions. Stale-display behavior is unchanged.
+
+## Slice B: isolated adapter hook and complete-window scanner
+
+`certification/adapter_evidence.py` is an **opt-in, in-process** hook for the
+actual Ops adapter source at Git blob
+`f085f4f3fe473379808e8be2f1fce61eafee565f` (SHA-256
+`1cebf8d9675e0955ceefc9400de06a9160b1d1029832f6f6c310a47878531d1f`).
+`load_pinned_adapter(path)` checks both digests *before importing* the file;
+source drift aborts. In a later sanctioned isolated/operator adapter launch,
+load that module, configure its original `ReadonlySnapshotHandler` with the
+approved token/base/SHA through the existing launcher contract, then enclose
+that **same module and real listener** in `with AdapterEvidence(module) as evidence:`.
+Open the hook before sending the first measured request; stop accepting traffic,
+shut down and join the listener and handler threads, then call `evidence.close()`
+before leaving the context. Never install two hook contexts for the same module.
+The wrapper delegates to the adapter's original `do_GET`, original
+`secrets.compare_digest`, and original `urlopen` no-redirect opener. It observes
+only the actual comparison result and `Request` method/explicit header *names*,
+plus opener result/HTTP redirect error; it does not copy snapshot logic, issue
+another request, change URLs, inspect values, or grant outbound authority.
+`authRejected` preceding `opsAttempts == 0` proves adapter failed auth, while a
+wrong token from the worker can still increment the worker's **separate**
+`fetchAttempts` once. Isolated tests use only ephemeral loopback Ops fixtures;
+no live Ops calls occur in this issue.
+
+Adapter receipt `ops_adapter_evidence_v1`: `status` (`complete` or
+`incomplete`), `incompleteReason` (`event_limit`, `window_expired`,
+`request_overlap`, or null), `inFlight`, `authAccepted`, `authRejected`,
+`opsAttempts`, `opsSuccesses`, `opsFailures`, `redirectRefusals`,
+`upstreamMethod` (`none`, `GET`, `other`), `headersOnlyOwned`,
+`upstreamAuthorizationAttached`, `upstreamCookieAttached`, and
+`upstreamProxyAuthorizationAttached`. "Success" means the opener returned a
+response (not that the complete snapshot parsed); failures include opener
+exceptions. The limit is 10,000 observed events / five minutes. A non-GET
+method is sticky (`other`), and a fully observed mixed-method window closes
+`incomplete` with exact reason `non_get_upstream` in either order; an earlier
+overlap/expiry/limit reason is not overwritten. Explicit sensitive header
+ownership (`headersOnlyOwned: false`) also remains sticky across later calls.
+This hook
+instruments a launched module; it is **not** installed in the running Ops unit,
+and a successful isolated receipt is not production certification.
+
+### Installed-worker cache identifier evidence
+
+The same **authorized company-scoped** `ops-certification` data bridge above
+provides the cache-identifier export. Enable certification for that company,
+call `start` before measured reads, then `close` after requests drain and save
+**the exact `data` receipt JSON** from the installed worker as the
+`cache_identifiers` UTF-8 export file. Do not dump `cache.keys()` or copy raw
+identifiers to the scanner. The worker scans its own process-private map at
+start, before every accepted-origin cache read (while the resolved token and
+secret-ref ID are still local), immediately after every insertion, and at
+read/close. It checks canonical `[companyId, pinnedOrigin]` key shape and
+compares live identifier plaintext against available resolved private values;
+no raw key, company identifier, token, secret ID, or secret value leaves the
+worker. A per-window random-key HMAC chain binds inspected identifiers in the
+receipt without an enumerable raw SHA-256 of the company ID. `cacheIdentifiers`
+contains `schema: ops_worker_cache_identifiers_v1`, `scans`,
+`entriesInspected` (cumulative inspected company entries, including repeated
+checks), `reads`, `inserts`, `leaks`, `shapeViolations`, and `digest` (64 hex
+characters). Zero `entriesInspected` is legitimate only when the complete
+window has no company cache entries. The installed cache is process-local:
+worker restart, disabled config, unavailable config, an overlapping request,
+uncanonical/unknown key, secret hit, >10,000 scans/inspections or >10,000 keys
+in any scan, or >4 KiB identifier marks the window incomplete. `start`,
+read/insert and close checks all run synchronously with the Map; an accepted
+request cannot insert after a complete close because in-flight requests cause
+`request_overlap`. Origin rejection happens before secret resolution and cache
+access; the certification bridge's own start/close inventory is a separate
+authorized read, not work performed by a rejected snapshot request. Mode-off
+snapshot behavior and envelopes are unchanged.
+
+The collector and scanner require this **actual trusted worker response**, not
+an operator's hand-written `clean` claim: both check receipt schema, exact
+window timestamps, complete/no-inflight state, zero leaks/shape violations,
+scan coverage (`scans >= 2 + reads + inserts`), counters (`reads == cacheReads`,
+`inserts == fetchSuccesses`, `entriesInspected >= inserts`), numeric limits
+and digest shape (positive inspections require a nonzero digest). A failed or
+unchecked scan cannot pass. These structural checks do not authenticate a
+forged receipt: retain the authorized bridge transport capture, company scope,
+start/close response linkage and deployment/process identity for later #3
+independent review. The internal plaintext comparison applies to resolved
+worker token and secret-ref ID available on accepted requests. Any *other*
+sensitive values/streams remain in the seven externally collected categories;
+external scanner stdin values never enter the worker. No hash alone proves
+plaintext absence.
+
+### Operator export and scan contract for later #3 (not run here)
+
+1. Establish a single window ID and exact start/end timestamps matching the
+   worker's `ops-certification` start/close receipt. Before measured traffic,
+   checkpoint every relevant sink: installed worker process logs (including
+   rotation/journal cursors), plugin/host logs, adapter service logs, errors,
+   runtime telemetry, the installed-worker `cache_identifiers` receipt via the
+   authorized bridge above, emitted data envelopes, and durable receipt fields. Capture all matching processes/streams, not a
+   filtered sample. Record start cursors **before** traffic and end cursors
+   **after** traffic and after pending requests/drains; prove continuity across
+   restarts, rotation and pagination. If a sink is inaccessible or a restart,
+   dropped event, overrun or gap is possible, set `complete: false` or
+   `truncated`/`overflow: true` and withhold certification. Export each entire
+   sink as a UTF-8 file, including explicit nonempty zero-event exports where
+   independently supported. No raw secret, auth header, request body or Location
+   should ever be emitted *by the instrumentation*; existing sink bytes are
+   handled as sensitive input, not printed.
+2. In a private 0700 evidence directory, create an `ops_observer_export_v1`
+   JSON manifest with `window`, numeric `startedAt`/`endedAt`, and **exactly**
+   eight `sources`: `worker_logs`, `plugin_logs`, `adapter_logs`, `errors`,
+   `telemetry`, `cache_identifiers`, `emitted_envelopes`,
+   `persisted_receipts`. Each has `path`, `bytes`, `sha256` of its independently
+   captured UTF-8 file and `coverage` containing matching numeric
+   `startedAt`/`endedAt`, `complete: true`, `truncated: false`,
+   `overflow: false`, nonempty `collector`, `startCursor`, and `endCursor`.
+   Retain the original manifest and independently verified source/stream
+   inventory and cursors; do not manufacture successful zero-event records.
+   The collector requires all eight; `collector` names are attestations by the
+   operator, not a scanner-derived proof.
+3. Run `python3 certification/window_collector.py <private-export-manifest.json> <new-private-output-dir>`.
+   It checks input byte counts/digests and bounds, wraps complete exports in
+   start/data/end sequence records, writes mode-0600 files plus
+   `<new-private-output-dir>/inventory.json`, and never prints input contents.
+   The inventory includes only the original manifest's path, byte count and
+   SHA-256, not copied cursor or extension values. Keep that original file at
+   its path, unchanged and private, through the scan; it is a required ninth
+   retained source. A missing, changed, oversized or omitted manifest is
+   incomplete, never clean.
+   Then run `python3 certification/window_scanner.py <new-private-output-dir>/inventory.json < <private-values.json>`.
+   The stdin JSON is `{ "values": ["<actual-token>", "<actual-secret>",
+   "<actual-sensitive-header-value>"] }`; create it privately from the
+   authorized secret store (0600) or pipe from protected memory, never put a
+   value in argv, shell history, logs or committed files. Include all relevant
+   plaintext token, resolved-secret and sensitive-header values, not just a
+   synthetic test sentinel. Exit 0 is clean, 1 is leak, 2 is incomplete/bad
+   inventory. CLI stdout contains only fixed classifications, counts, category
+   names, byte counts and digests; it does not echo paths, matches or values.
+
+Scanner bounds: eight mandatory sink sources plus the <=1 MiB original manifest
+and <=1 MiB retained inventory,
+each sink <=4 MiB / 10,000 ordered records,
+all contiguous sequence numbers, start/data/end markers and time bounds,
+source SHA-256/byte equality, no missing or false-complete flags, <=32 private
+values of <=4 KiB each. It scans the entire retained inventory (including
+its manifest reference filename, every source path, every metadata key/value,
+and unexpected fields) as raw UTF-8 and decoded JSON, preserving duplicate
+keys for hygiene scanning. It scans the verified original manifest in the
+same way, and scans raw UTF-8 bytes, decoded JSON documents and
+newline-delimited JSON exports (including one bounded Unicode-escape layer).
+Extra inventory metadata cannot conceal a leak; required structural fields
+and categories remain mandatory. It rechecks the original manifest's and
+source files' bytes and digests and their linkage to wrapped exports. Missing
+or modified references, malformed JSON-looking exports, excessive nesting,
+and exceeded bounds return incomplete rather than clean; opaque non-JSON text
+is scanned as text. Results contain counts, fixed categories and digests,
+never retained pathnames, snippets or private values. Neither a clean scan
+nor an inventory path proves the operator's cursors are truthful.
+The digest/marker validation proves integrity of
+*supplied* exports, **not** that an external collector actually captured every
+production stream or that its cursors truthfully cover the interval. External
+coverage/readback is a separate #3 review gate. An empty fabricated fixture,
+mocked worker, or `status: clean` alone must never be represented as a live
+whole-window certification. These tools add no CI, live service, config or
+outbound changes.
 
 ## Opt-in bounded cross-integration
 

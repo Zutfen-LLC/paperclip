@@ -1,0 +1,318 @@
+"""Bounded complete-window inventory scanner. Secrets enter only through stdin in CLI mode.
+
+This verifies supplied exports, not the collector's independent claim that its
+export included every production sink. Never print content, paths or values.
+"""
+import hashlib
+import json
+import re
+import sys
+from pathlib import Path
+from typing import NoReturn
+
+CATEGORIES = ('worker_logs', 'plugin_logs', 'adapter_logs', 'errors', 'telemetry',
+              'cache_identifiers', 'emitted_envelopes', 'persisted_receipts')
+MAX_SOURCE_BYTES = 4 * 1024 * 1024
+MAX_RECORDS = 10_000
+CACHE_RECEIPT_FIELDS = frozenset(('schema', 'status', 'incompleteReason',
+    'startedAt', 'endedAt', 'inFlight', 'counters', 'cacheIdentifiers',
+    'upstreamMethod', 'adapterAuthHeaderAttached'))
+CACHE_EVIDENCE_FIELDS = frozenset(('schema', 'scans', 'entriesInspected',
+    'reads', 'inserts', 'leaks', 'shapeViolations', 'digest'))
+WORKER_COUNTER_FIELDS = frozenset(('acceptedOrigin', 'rejectedOrigin',
+    'secretResolutionAttempts', 'secretResolutionFailures', 'cacheReads',
+    'cacheHits', 'cacheMisses', 'cacheRefreshes', 'fetchAttempts',
+    'fetchSuccesses', 'fetchFailures', 'redirectRefusals', 'upstreamGet',
+    'adapterAuthAttached'))
+INVENTORY_FIELDS = frozenset(('schema', 'window', 'startedAt', 'endedAt', 'sources', 'exportManifest'))
+SOURCE_FIELDS = frozenset(('path', 'bytes', 'sha256', 'coverage'))
+MANIFEST_REFERENCE_FIELDS = frozenset(('path', 'bytes', 'sha256'))
+COVERAGE_FIELDS = frozenset(('startedAt', 'endedAt', 'complete', 'truncated', 'overflow', 'collector'))
+UNICODE_ESCAPE = re.compile(r'\\u[0-9a-fA-F]{4}')
+
+
+class EvidenceError(ValueError):
+    pass
+
+
+def validate_cache_receipt(receipt, start, end):
+    """Validate a worker-generated, authorized bridge receipt, not a made-up clean file.
+
+    Provenance of the captured bridge response remains an operator attestation;
+    metadata alone cannot authenticate an installed process against forgery.
+    """
+    if not isinstance(receipt, dict) or receipt.get('schema') != 'ops_observer_certification_v1':
+        _reject('cache_receipt_required')
+    evidence = receipt.get('cacheIdentifiers')
+    counters = receipt.get('counters')
+    if (receipt.get('status') != 'complete' or receipt.get('incompleteReason') is not None
+        or receipt.get('startedAt') != start or receipt.get('endedAt') != end
+        or type(receipt.get('inFlight')) is not int or receipt['inFlight'] != 0
+        or not isinstance(evidence, dict) or evidence.get('schema') != 'ops_worker_cache_identifiers_v1'
+        or not isinstance(counters, dict)):
+        _reject('cache_receipt_incomplete')
+    if (set(receipt) != CACHE_RECEIPT_FIELDS or set(evidence) != CACHE_EVIDENCE_FIELDS
+        or set(counters) != WORKER_COUNTER_FIELDS
+        or any(type(value) is not int or not 0 <= value <= MAX_RECORDS
+               for value in counters.values())):
+        _reject('cache_receipt_shape')
+    fields = ('scans', 'entriesInspected', 'reads', 'inserts', 'leaks', 'shapeViolations')
+    if any(type(evidence.get(k)) is not int or not 0 <= evidence[k] <= MAX_RECORDS for k in fields):
+        _reject('cache_inventory_limit')
+    if (evidence['leaks'] or evidence['shapeViolations']
+        or evidence['scans'] < 2 + evidence['reads'] + evidence['inserts']
+        or evidence['entriesInspected'] < evidence['inserts']
+        or evidence['reads'] != counters.get('cacheReads')
+        or evidence['inserts'] != counters.get('fetchSuccesses')
+        or type(counters.get('cacheReads')) is not int
+        or type(counters.get('fetchSuccesses')) is not int):
+        _reject('cache_receipt_mismatch')
+    digest = evidence.get('digest')
+    if (not isinstance(digest, str) or len(digest) != 64
+        or any(c not in '0123456789abcdef' for c in digest)
+        or (evidence['entriesInspected'] > 0 and digest == '0' * 64)):
+        _reject('cache_receipt_integrity')
+
+
+def _reject(reason) -> NoReturn:
+    raise EvidenceError(reason)
+
+def _matches(value, patterns):
+    """Scan all decoded JSON keys/values, with one bounded Unicode escape layer."""
+    matches = 0
+    stack = [(value, 0)]
+    seen = 0
+    while stack:
+        item, depth = stack.pop()
+        seen += 1
+        if seen > 100_000 or depth > 32:
+            _reject('decoded_structure_limit')
+        if isinstance(item, dict):
+            stack.extend((child, depth + 1) for pair in item.items() for child in pair)
+        elif isinstance(item, (list, tuple)):
+            stack.extend((child, depth + 1) for child in item)
+        elif isinstance(item, str):
+            if len(item) > MAX_SOURCE_BYTES:
+                _reject('decoded_string_limit')
+            matches += sum(item.encode('utf-8').count(pattern) for pattern in patterns)
+            if UNICODE_ESCAPE.search(item):
+                # json.dumps escapes literal backslashes. Undo only that escaping;
+                # JSON itself performs the one permitted Unicode decoding pass.
+                try:
+                    decoded = json.loads(json.dumps(item).replace('\\\\u', '\\u'))
+                    encoded = decoded.encode('utf-8')
+                except (ValueError, UnicodeError):
+                    _reject('invalid_decoded_string')
+                if len(encoded) > MAX_SOURCE_BYTES:
+                    _reject('decoded_string_limit')
+                matches += sum(encoded.count(pattern) for pattern in patterns)
+                if UNICODE_ESCAPE.search(decoded) and not matches:
+                    _reject('nested_encoding_limit')
+    return matches
+
+def _export_matches(text, patterns):
+    """A JSON document or newline-delimited JSON; opaque text stays raw-scanned."""
+    stripped = text.lstrip()
+    if not stripped or stripped[0] not in '{["':
+        return _matches(text, patterns)
+    try:
+        decoded = json.loads(text)
+        documents = [decoded]
+    except (ValueError, RecursionError):
+        lines = [line for line in text.splitlines() if line.strip()]
+        if len(lines) < 2 or len(lines) > MAX_RECORDS:
+            _reject('invalid_export_json')
+        try:
+            documents = [json.loads(line) for line in lines]
+        except (ValueError, RecursionError):
+            _reject('invalid_export_json')
+    return max(_matches(text, patterns), sum(_matches(doc, patterns) for doc in documents))
+
+def _retained_matches(raw, decoded, patterns, limit, reason):
+    """Bound and scan a complete retained JSON representation, including keys and paths."""
+    if not raw or len(raw) > limit:
+        _reject(reason)
+    try:
+        text = raw.decode('utf-8')
+        # Keep every duplicate key/value that ordinary dict decoding discards.
+        all_fields = json.loads(text, object_pairs_hook=lambda pairs: pairs)
+    except (UnicodeError, ValueError, RecursionError):
+        _reject(reason)
+    return max(sum(raw.count(pattern) for pattern in patterns),
+               _matches(text, patterns), _matches(decoded, patterns),
+               _matches(all_fields, patterns))
+
+def _read_verified(reference, limit, reason):
+    if (not isinstance(reference, dict) or not MANIFEST_REFERENCE_FIELDS <= set(reference)
+        or not isinstance(reference.get('path'), str) or not reference['path']
+        or type(reference.get('bytes')) is not int or not 1 <= reference['bytes'] <= limit
+        or not isinstance(reference.get('sha256'), str) or len(reference['sha256']) != 64
+        or any(c not in '0123456789abcdef' for c in reference['sha256'])):
+        _reject(reason)
+    try:
+        with open(reference['path'], 'rb') as handle: raw = handle.read(limit + 1)
+    except OSError:
+        _reject(reason)
+    if len(raw) != reference['bytes'] or hashlib.sha256(raw).hexdigest() != reference['sha256']:
+        _reject(reason)
+    return raw
+
+
+def scan_inventory(inventory, values, *, max_source_bytes=MAX_SOURCE_BYTES, max_records=MAX_RECORDS,
+                   inventory_raw=None):
+    """Require every category's digest, size, coverage and ordered start/end markers."""
+    if not isinstance(inventory, dict) or inventory.get('schema') != 'ops_observer_window_inventory_v1':
+        _reject('invalid_inventory')
+    if not INVENTORY_FIELDS <= set(inventory):
+        _reject('invalid_inventory')
+    sources = inventory.get('sources')
+    if not isinstance(sources, dict) or set(sources) != set(CATEGORIES):
+        _reject('missing_or_extra_source')
+    start, end = inventory.get('startedAt'), inventory.get('endedAt')
+    window = inventory.get('window')
+    if not isinstance(window, str) or not window or not all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in (start, end)) or start >= end:
+        _reject('invalid_window')
+    if (not isinstance(values, list) or not values or len(values) > 32
+        or any(not isinstance(v, str) or not v or len(v.encode('utf-8')) > 4096 for v in values)):
+        _reject('invalid_private_values')
+    if not 1 <= max_source_bytes <= MAX_SOURCE_BYTES or not 2 <= max_records <= MAX_RECORDS:
+        _reject('invalid_limit')
+    patterns = [v.encode('utf-8') for v in set(values)]
+    # The actual CLI bytes may contain escapes or duplicate keys erased by
+    # JSON parsing. Direct callers get a bounded serialized representation.
+    try:
+        metadata_bytes = json.dumps(inventory, ensure_ascii=False).encode('utf-8')
+    except (ValueError, TypeError, UnicodeError, RecursionError):
+        _reject('invalid_inventory')
+    inventory_matches = _retained_matches(metadata_bytes, inventory, patterns, 1024 * 1024, 'inventory_limit')
+    if inventory_raw is not None:
+        inventory_matches = max(inventory_matches, _retained_matches(
+            inventory_raw, inventory, patterns, 1024 * 1024, 'inventory_limit'))
+    manifest_raw = _read_verified(inventory['exportManifest'], 1024 * 1024, 'export_manifest_integrity')
+    try:
+        manifest_text = manifest_raw.decode('utf-8')
+        original = json.loads(manifest_text)
+    except (UnicodeError, ValueError, RecursionError):
+        _reject('invalid_export_manifest')
+    if (not isinstance(original, dict) or original.get('schema') != 'ops_observer_export_v1'
+        or original.get('window') != window or original.get('startedAt') != start
+        or original.get('endedAt') != end or not isinstance(original.get('sources'), dict)
+        or set(original['sources']) != set(CATEGORIES)):
+        _reject('export_manifest_mismatch')
+    # Include every original field, even fields the collector intentionally
+    # does not carry into its sanitized inventory. Check original raw bytes,
+    # parsed JSON, and the scanner's bounded Unicode-escape layer.
+    manifest_matches = _retained_matches(manifest_raw, original, patterns, 1024 * 1024,
+                                         'export_manifest_integrity')
+    categories = {}
+    for category in CATEGORIES:
+        source = sources[category]
+        if not isinstance(source, dict) or not SOURCE_FIELDS <= set(source): _reject('invalid_source')
+        coverage = source.get('coverage')
+        if (not isinstance(coverage, dict) or not COVERAGE_FIELDS <= set(coverage)
+            or coverage.get('startedAt') != start
+            or coverage.get('endedAt') != end or coverage.get('complete') is not True
+            or coverage.get('truncated') is not False or coverage.get('overflow') is not False
+            or not isinstance(coverage.get('collector'), str) or not coverage['collector']):
+            _reject('incomplete_coverage')
+        original_source = original['sources'][category]
+        if not isinstance(original_source, dict) or not isinstance(original_source.get('coverage'), dict):
+            _reject('export_manifest_mismatch')
+        original_coverage = original_source['coverage']
+        if (any(original_coverage.get(key) != coverage[key] for key in COVERAGE_FIELDS)
+            or any(not isinstance(original_coverage.get(key), str) or not original_coverage[key]
+                   for key in ('startCursor', 'endCursor'))):
+            _reject('export_manifest_mismatch')
+        original_raw = _read_verified({key: original_source.get(key) for key in MANIFEST_REFERENCE_FIELDS},
+                                      max_source_bytes, 'export_source_integrity')
+        try: original_text = original_raw.decode('utf-8')
+        except UnicodeError: _reject('invalid_export_encoding')
+        size, digest, path = source.get('bytes'), source.get('sha256'), source.get('path')
+        if (type(size) is not int or not 1 <= size <= max_source_bytes or
+            not isinstance(digest, str) or len(digest) != 64 or
+            not isinstance(path, str) or not path): _reject('invalid_source_metadata')
+        try:
+            with open(path, 'rb') as handle: raw = handle.read(max_source_bytes + 1)
+        except OSError: _reject('source_unavailable')
+        if len(raw) != size or hashlib.sha256(raw).hexdigest() != digest:
+            _reject('source_integrity_failure')
+        try:
+            data = json.loads(raw.decode('utf-8'))
+        except (UnicodeError, ValueError, RecursionError): _reject('invalid_source_encoding')
+        if not isinstance(data, dict) or data.get('window') != window or not isinstance(data.get('records'), list):
+            _reject('invalid_records')
+        records = data['records']
+        # Collector wraps the exact original UTF-8 export; direct scanner
+        # inventories may point both references at the same unwrapped source.
+        if original_raw != raw:
+            if (len(records) != 3 or not isinstance(records[1], dict)
+                or not isinstance(records[1].get('payload'), dict)
+                or records[1]['payload'].get('export') != original_text):
+                _reject('export_source_mismatch')
+        if category == 'cache_identifiers':
+            if len(records) != 3 or not isinstance(records[1], dict):
+                _reject('cache_receipt_required')
+            payload = records[1].get('payload')
+            if not isinstance(payload, dict): _reject('cache_receipt_required')
+            if 'export' in payload:
+                try: worker_receipt = json.loads(payload['export'])
+                except (TypeError, ValueError, RecursionError): _reject('cache_receipt_required')
+            else:
+                worker_receipt = payload.get('receipt')
+            validate_cache_receipt(worker_receipt, start, end)
+        if not 3 <= len(records) <= max_records: _reject('record_limit_or_empty')
+        if any(not isinstance(record, dict) for record in records): _reject('invalid_record')
+        if (records[0].get('kind') != 'start' or records[-1].get('kind') != 'end'
+            or records[0].get('at') != start or records[-1].get('at') != end):
+            _reject('marker_mismatch')
+        last_at = start
+        # Attribute global inventory/manifest hits to one fixed category;
+        # never include a retained pathname or arbitrary key in the result.
+        metadata_matches = inventory_matches + manifest_matches if category == CATEGORIES[0] else 0
+        export_matches = 0
+        for index, record in enumerate(records):
+            if not isinstance(record, dict): _reject('invalid_record')
+            at = record.get('at')
+            if (record.get('seq') != index or type(at) not in (int, float)
+                or not start <= at <= end or at < last_at
+                or record.get('kind') not in ('start', 'data', 'end')
+                or (index not in (0, len(records)-1) and record['kind'] != 'data')
+                or 'payload' not in record): _reject('record_gap_or_race')
+            last_at = at
+            # Search both raw source bytes and decoded record/export representations.
+            if record['kind'] == 'data':
+                payload = record['payload']
+                if isinstance(payload, dict) and isinstance(payload.get('export'), str):
+                    export_matches += _export_matches(payload['export'], patterns)
+        # Whole raw source also includes metadata and JSON-escaped representation.
+        # Count raw matches not already represented by decoded nested payload scan.
+        raw_matches = sum(raw.count(value) for value in patterns)
+        matches = metadata_matches + max(raw_matches, _matches(data, patterns), export_matches,
+                                         _export_matches(original_text, patterns))
+        categories[category] = {'matches': matches, 'records': len(records), 'bytes': size, 'sha256': digest}
+    return {'schema': 'ops_observer_hygiene_v1', 'status': 'leak' if any(v['matches'] for v in categories.values()) else 'clean',
+            'categories': categories}
+
+
+def main():
+    # argv contains only inventory path; values arrive through private stdin.
+    try:
+        if len(sys.argv) != 2: _reject('usage')
+        inventory_path = Path(sys.argv[1])
+        if inventory_path.stat().st_size > 1024 * 1024: _reject('inventory_limit')
+        inventory_raw = inventory_path.read_bytes()
+        inventory = json.loads(inventory_raw.decode('utf-8'))
+        private = sys.stdin.buffer.read(128 * 1024 + 1)
+        if len(private) > 128 * 1024: _reject('private_input_limit')
+        values = json.loads(private.decode('utf-8'))['values']
+        result = scan_inventory(inventory, values, inventory_raw=inventory_raw)
+    except (EvidenceError, OSError, KeyError, TypeError, ValueError, UnicodeError, RecursionError) as exc:
+        # Fixed, bounded reason only; even JSON errors and paths can contain secrets.
+        reason = str(exc) if isinstance(exc, EvidenceError) else 'invalid_input'
+        print(json.dumps({'schema': 'ops_observer_hygiene_v1', 'status': 'incomplete', 'reason': reason}))
+        return 2
+    print(json.dumps(result, sort_keys=True))
+    return 1 if result['status'] == 'leak' else 0
+
+
+if __name__ == '__main__': sys.exit(main())
