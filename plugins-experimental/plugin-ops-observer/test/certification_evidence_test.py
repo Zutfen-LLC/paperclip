@@ -235,6 +235,87 @@ class ScannerTests(unittest.TestCase):
 
     def scan(self): return scan_inventory(self.inventory, [SECRET, LEAK])
 
+    def export_manifest(self):
+        export = {'schema': 'ops_observer_export_v1', 'window': 'isolated-1',
+                  'startedAt': 100, 'endedAt': 200, 'sources': {}}
+        for category in CATEGORIES:
+            path = self.root / ('raw-' + category)
+            raw = json.dumps(self.cache_receipt() if category == 'cache_identifiers'
+                             else {'events': [], 'note': 'actually exported'}).encode()
+            path.write_bytes(raw)
+            export['sources'][category] = {'path': str(path), 'bytes': len(raw),
+              'sha256': hashlib.sha256(raw).hexdigest(), 'coverage': {
+                'startedAt': 100, 'endedAt': 200, 'complete': True, 'truncated': False,
+                'overflow': False, 'collector': 'operator-export', 'startCursor': 'before', 'endCursor': 'after'}}
+        return export
+
+    def replace_export(self, export, category, raw):
+        source = export['sources'][category]
+        Path(source['path']).write_bytes(raw)
+        source['bytes'] = len(raw)
+        source['sha256'] = hashlib.sha256(raw).hexdigest()
+
+    def test_collector_unicode_escaped_json_and_log_lines_each_sink(self):
+        escaped = ''.join('\\u%04x' % ord(char) for char in SECRET)
+        for category in CATEGORIES:
+            with self.subTest(category=category):
+                export = self.export_manifest()
+                if category == 'cache_identifiers':
+                    receipt = self.cache_receipt()
+                    raw = json.dumps(receipt)[:-1].encode() + b',"extra":"' + escaped.encode() + b'"}'
+                else:
+                    raw = ('{"event":"' + escaped + '"}').encode()
+                    if category == 'worker_logs':
+                        raw = b'{"event":"ordinary"}\n' + raw + b'\n'
+                self.replace_export(export, category, raw)
+                if category == 'cache_identifiers':
+                    with self.assertRaises(EvidenceError): collect_inventory(export, self.root / ('escaped-' + category))
+                    continue  # Worker receipt cannot contain unexpected fields.
+                inventory = collect_inventory(export, self.root / ('escaped-' + category))
+                result = scan_inventory(inventory, [SECRET])
+                self.assertEqual(result['status'], 'leak')
+                self.assertGreater(result['categories'][category]['matches'], 0)
+                self.assertNotIn(SECRET, json.dumps(result))
+
+    def test_collector_json_string_export_and_metadata_are_scanned(self):
+        export = self.export_manifest()
+        self.replace_export(export, 'errors', json.dumps(SECRET).encode())
+        export['sources']['worker_logs']['coverage']['collector'] = SECRET
+        inventory = collect_inventory(export, self.root / 'metadata')
+        result = scan_inventory(inventory, [SECRET])
+        self.assertEqual(result['status'], 'leak')
+        self.assertNotIn(SECRET, json.dumps(result))
+        inventory['sources']['worker_logs']['coverage']['collector'] = 'operator-export'
+        self.assertEqual(scan_inventory(inventory, [SECRET])['status'], 'leak')
+        self.replace_export(export, 'errors', b'{"safe":true}')
+        clean = collect_inventory(export, self.root / 'window-meta')
+        clean['window'] = ''.join('\\u%04x' % ord(c) for c in SECRET)
+        for category in CATEGORIES:
+            source = clean['sources'][category]
+            data = json.loads(Path(source['path']).read_text())
+            data['window'] = clean['window']
+            raw = json.dumps(data).encode()
+            Path(source['path']).write_bytes(raw)
+            source['bytes'], source['sha256'] = len(raw), hashlib.sha256(raw).hexdigest()
+        self.assertEqual(scan_inventory(clean, [SECRET])['status'], 'leak')
+
+    def test_allowed_worker_receipt_metadata_private_value_is_not_clean(self):
+        receipt = self.cache_receipt()
+        receipt['upstreamMethod'] = SECRET
+        self.put('cache_identifiers', {'receipt': receipt})
+        result = self.scan()
+        self.assertEqual(result['status'], 'leak')
+        self.assertNotIn(SECRET, json.dumps(result))
+
+    def test_collector_malformed_or_deep_json_is_incomplete_without_echo(self):
+        for index, raw in enumerate((b'{"event":"\\u0070"', b'[' * 64 + b'0' + b']' * 64)):
+            export = self.export_manifest()
+            self.replace_export(export, 'worker_logs', raw)
+            inventory = collect_inventory(export, self.root / ('malformed-' + str(index)))
+            with self.assertRaises(EvidenceError) as ctx:
+                scan_inventory(inventory, [SECRET])
+            self.assertNotIn(raw.decode(), str(ctx.exception))
+
     def test_all_categories_clean_with_complete_markers(self):
         result = self.scan()
         self.assertEqual(result['status'], 'clean')
