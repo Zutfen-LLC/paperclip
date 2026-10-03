@@ -5,6 +5,7 @@ export included every production sink. Never print content, paths or values.
 """
 import hashlib
 import json
+import re
 import sys
 from pathlib import Path
 from typing import NoReturn
@@ -23,6 +24,10 @@ WORKER_COUNTER_FIELDS = frozenset(('acceptedOrigin', 'rejectedOrigin',
     'cacheHits', 'cacheMisses', 'cacheRefreshes', 'fetchAttempts',
     'fetchSuccesses', 'fetchFailures', 'redirectRefusals', 'upstreamGet',
     'adapterAuthAttached'))
+INVENTORY_FIELDS = frozenset(('schema', 'window', 'startedAt', 'endedAt', 'sources'))
+SOURCE_FIELDS = frozenset(('path', 'bytes', 'sha256', 'coverage'))
+COVERAGE_FIELDS = frozenset(('startedAt', 'endedAt', 'complete', 'truncated', 'overflow', 'collector'))
+UNICODE_ESCAPE = re.compile(r'\\u[0-9a-fA-F]{4}')
 
 
 class EvidenceError(ValueError):
@@ -71,10 +76,63 @@ def validate_cache_receipt(receipt, start, end):
 def _reject(reason) -> NoReturn:
     raise EvidenceError(reason)
 
+def _matches(value, patterns):
+    """Scan all decoded JSON keys/values, with one bounded Unicode escape layer."""
+    matches = 0
+    stack = [(value, 0)]
+    seen = 0
+    while stack:
+        item, depth = stack.pop()
+        seen += 1
+        if seen > 100_000 or depth > 32:
+            _reject('decoded_structure_limit')
+        if isinstance(item, dict):
+            stack.extend((child, depth + 1) for pair in item.items() for child in pair)
+        elif isinstance(item, list):
+            stack.extend((child, depth + 1) for child in item)
+        elif isinstance(item, str):
+            if len(item) > MAX_SOURCE_BYTES:
+                _reject('decoded_string_limit')
+            matches += sum(item.encode('utf-8').count(pattern) for pattern in patterns)
+            if UNICODE_ESCAPE.search(item):
+                # json.dumps escapes literal backslashes. Undo only that escaping;
+                # JSON itself performs the one permitted Unicode decoding pass.
+                try:
+                    decoded = json.loads(json.dumps(item).replace('\\\\u', '\\u'))
+                    encoded = decoded.encode('utf-8')
+                except (ValueError, UnicodeError):
+                    _reject('invalid_decoded_string')
+                if len(encoded) > MAX_SOURCE_BYTES:
+                    _reject('decoded_string_limit')
+                matches += sum(encoded.count(pattern) for pattern in patterns)
+                if UNICODE_ESCAPE.search(decoded) and not matches:
+                    _reject('nested_encoding_limit')
+    return matches
+
+def _export_matches(text, patterns):
+    """A JSON document or newline-delimited JSON; opaque text stays raw-scanned."""
+    stripped = text.lstrip()
+    if not stripped or stripped[0] not in '{["':
+        return _matches(text, patterns)
+    try:
+        decoded = json.loads(text)
+        documents = [decoded]
+    except (ValueError, RecursionError):
+        lines = [line for line in text.splitlines() if line.strip()]
+        if len(lines) < 2 or len(lines) > MAX_RECORDS:
+            _reject('invalid_export_json')
+        try:
+            documents = [json.loads(line) for line in lines]
+        except (ValueError, RecursionError):
+            _reject('invalid_export_json')
+    return max(_matches(text, patterns), sum(_matches(doc, patterns) for doc in documents))
+
 
 def scan_inventory(inventory, values, *, max_source_bytes=MAX_SOURCE_BYTES, max_records=MAX_RECORDS):
     """Require every category's digest, size, coverage and ordered start/end markers."""
     if not isinstance(inventory, dict) or inventory.get('schema') != 'ops_observer_window_inventory_v1':
+        _reject('invalid_inventory')
+    if set(inventory) != INVENTORY_FIELDS:
         _reject('invalid_inventory')
     sources = inventory.get('sources')
     if not isinstance(sources, dict) or set(sources) != set(CATEGORIES):
@@ -89,12 +147,22 @@ def scan_inventory(inventory, values, *, max_source_bytes=MAX_SOURCE_BYTES, max_
     if not 1 <= max_source_bytes <= MAX_SOURCE_BYTES or not 2 <= max_records <= MAX_RECORDS:
         _reject('invalid_limit')
     patterns = [v.encode('utf-8') for v in set(values)]
+    # This is itself a persisted receipt. Bound it even for direct API callers,
+    # and scan every retained field, not just source record payloads.
+    try:
+        metadata_bytes = json.dumps(inventory, ensure_ascii=False).encode('utf-8')
+    except (ValueError, TypeError, UnicodeError, RecursionError):
+        _reject('invalid_inventory')
+    if len(metadata_bytes) > 1024 * 1024:
+        _reject('inventory_limit')
+    window_matches = _matches(window, patterns)
     categories = {}
     for category in CATEGORIES:
         source = sources[category]
-        if not isinstance(source, dict): _reject('invalid_source')
+        if not isinstance(source, dict) or set(source) != SOURCE_FIELDS: _reject('invalid_source')
         coverage = source.get('coverage')
-        if (not isinstance(coverage, dict) or coverage.get('startedAt') != start
+        if (not isinstance(coverage, dict) or set(coverage) != COVERAGE_FIELDS
+            or coverage.get('startedAt') != start
             or coverage.get('endedAt') != end or coverage.get('complete') is not True
             or coverage.get('truncated') is not False or coverage.get('overflow') is not False
             or not isinstance(coverage.get('collector'), str) or not coverage['collector']):
@@ -110,7 +178,7 @@ def scan_inventory(inventory, values, *, max_source_bytes=MAX_SOURCE_BYTES, max_
             _reject('source_integrity_failure')
         try:
             data = json.loads(raw.decode('utf-8'))
-        except (UnicodeError, ValueError): _reject('invalid_source_encoding')
+        except (UnicodeError, ValueError, RecursionError): _reject('invalid_source_encoding')
         if not isinstance(data, dict) or data.get('window') != window or not isinstance(data.get('records'), list):
             _reject('invalid_records')
         records = data['records']
@@ -121,7 +189,7 @@ def scan_inventory(inventory, values, *, max_source_bytes=MAX_SOURCE_BYTES, max_
             if not isinstance(payload, dict): _reject('cache_receipt_required')
             if 'export' in payload:
                 try: worker_receipt = json.loads(payload['export'])
-                except (TypeError, ValueError): _reject('cache_receipt_required')
+                except (TypeError, ValueError, RecursionError): _reject('cache_receipt_required')
             else:
                 worker_receipt = payload.get('receipt')
             validate_cache_receipt(worker_receipt, start, end)
@@ -131,7 +199,8 @@ def scan_inventory(inventory, values, *, max_source_bytes=MAX_SOURCE_BYTES, max_
             or records[0].get('at') != start or records[-1].get('at') != end):
             _reject('marker_mismatch')
         last_at = start
-        matches = 0
+        metadata_matches = _matches(source, patterns) + (window_matches if category == CATEGORIES[0] else 0)
+        export_matches = 0
         for index, record in enumerate(records):
             if not isinstance(record, dict): _reject('invalid_record')
             at = record.get('at')
@@ -141,15 +210,15 @@ def scan_inventory(inventory, values, *, max_source_bytes=MAX_SOURCE_BYTES, max_
                 or (index not in (0, len(records)-1) and record['kind'] != 'data')
                 or 'payload' not in record): _reject('record_gap_or_race')
             last_at = at
-            # Search actual UTF-8 source bytes (including JSON escaping/keys) AND
-            # decoded payloads, so escaped Unicode secrets cannot evade detection.
+            # Search both raw source bytes and decoded record/export representations.
             if record['kind'] == 'data':
-                serialized = json.dumps(record['payload'], ensure_ascii=False).encode('utf-8')
-                matches += sum(serialized.count(value) for value in patterns)
+                payload = record['payload']
+                if isinstance(payload, dict) and isinstance(payload.get('export'), str):
+                    export_matches += _export_matches(payload['export'], patterns)
         # Whole raw source also includes metadata and JSON-escaped representation.
         # Count raw matches not already represented by decoded nested payload scan.
         raw_matches = sum(raw.count(value) for value in patterns)
-        matches = max(matches, raw_matches)
+        matches = metadata_matches + max(raw_matches, _matches(data, patterns), export_matches)
         categories[category] = {'matches': matches, 'records': len(records), 'bytes': size, 'sha256': digest}
     return {'schema': 'ops_observer_hygiene_v1', 'status': 'leak' if any(v['matches'] for v in categories.values()) else 'clean',
             'categories': categories}
@@ -166,7 +235,7 @@ def main():
         if len(private) > 128 * 1024: _reject('private_input_limit')
         values = json.loads(private.decode('utf-8'))['values']
         result = scan_inventory(inventory, values)
-    except (EvidenceError, OSError, KeyError, TypeError, ValueError, UnicodeError) as exc:
+    except (EvidenceError, OSError, KeyError, TypeError, ValueError, UnicodeError, RecursionError) as exc:
         # Fixed, bounded reason only; even JSON errors and paths can contain secrets.
         reason = str(exc) if isinstance(exc, EvidenceError) else 'invalid_input'
         print(json.dumps({'schema': 'ops_observer_hygiene_v1', 'status': 'incomplete', 'reason': reason}))

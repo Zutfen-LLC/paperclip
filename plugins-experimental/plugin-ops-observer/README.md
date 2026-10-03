@@ -296,8 +296,12 @@ plaintext absence.
 Scanner bounds: eight mandatory sources, each <=4 MiB / 10,000 ordered records,
 all contiguous sequence numbers, start/data/end markers and time bounds,
 source SHA-256/byte equality, no missing or false-complete flags, <=32 private
-values of <=4 KiB each. It scans UTF-8 text and nested JSON-serialized payloads
-without reporting snippets. The digest/marker validation proves integrity of
+values of <=4 KiB each. It scans raw UTF-8 bytes, decoded JSON documents and
+newline-delimited JSON exports (including one bounded Unicode-escape layer),
+and all retained inventory/coverage metadata. Malformed JSON-looking exports,
+excessive nesting, and unexpected inventory fields return incomplete rather
+than clean; opaque non-JSON text is scanned as text. It reports no snippets.
+The digest/marker validation proves integrity of
 *supplied* exports, **not** that an external collector actually captured every
 production stream or that its cursors truthfully cover the interval. External
 coverage/readback is a separate #3 review gate. An empty fabricated fixture,

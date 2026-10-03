@@ -262,15 +262,13 @@ class ScannerTests(unittest.TestCase):
                 export = self.export_manifest()
                 if category == 'cache_identifiers':
                     receipt = self.cache_receipt()
-                    raw = json.dumps(receipt)[:-1].encode() + b',"extra":"' + escaped.encode() + b'"}'
+                    receipt['upstreamMethod'] = SECRET
+                    raw = json.dumps(receipt).replace(SECRET, escaped).encode()
                 else:
                     raw = ('{"event":"' + escaped + '"}').encode()
                     if category == 'worker_logs':
                         raw = b'{"event":"ordinary"}\n' + raw + b'\n'
                 self.replace_export(export, category, raw)
-                if category == 'cache_identifiers':
-                    with self.assertRaises(EvidenceError): collect_inventory(export, self.root / ('escaped-' + category))
-                    continue  # Worker receipt cannot contain unexpected fields.
                 inventory = collect_inventory(export, self.root / ('escaped-' + category))
                 result = scan_inventory(inventory, [SECRET])
                 self.assertEqual(result['status'], 'leak')
@@ -307,6 +305,19 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(result['status'], 'leak')
         self.assertNotIn(SECRET, json.dumps(result))
 
+    def test_collector_private_coverage_metadata_and_unexpected_receipt_fields(self):
+        export = self.export_manifest()
+        export['sources']['worker_logs']['coverage']['collector'] = SECRET
+        inventory = collect_inventory(export, self.root / 'collector-private')
+        result = scan_inventory(inventory, [SECRET])
+        self.assertEqual(result['status'], 'leak')
+        self.assertGreater(result['categories']['worker_logs']['matches'], 0)
+        self.assertNotIn(SECRET, json.dumps(result))
+        inventory['extra'] = SECRET
+        with self.assertRaises(EvidenceError) as ctx:
+            scan_inventory(inventory, [SECRET])
+        self.assertNotIn(SECRET, str(ctx.exception))
+
     def test_collector_malformed_or_deep_json_is_incomplete_without_echo(self):
         for index, raw in enumerate((b'{"event":"\\u0070"', b'[' * 64 + b'0' + b']' * 64)):
             export = self.export_manifest()
@@ -315,6 +326,14 @@ class ScannerTests(unittest.TestCase):
             with self.assertRaises(EvidenceError) as ctx:
                 scan_inventory(inventory, [SECRET])
             self.assertNotIn(raw.decode(), str(ctx.exception))
+            path = self.root / ('inventory-' + str(index) + '.json')
+            path.write_text(json.dumps(inventory))
+            cli = subprocess.run([sys.executable, '-B', str(ROOT / 'certification' / 'window_scanner.py'),
+                                  str(path)], input=json.dumps({'values': [SECRET]}),
+                                 text=True, capture_output=True, timeout=5)
+            self.assertEqual(cli.returncode, 2)
+            self.assertEqual(json.loads(cli.stdout)['status'], 'incomplete')
+            self.assertNotIn(raw.decode(), cli.stdout + cli.stderr)
 
     def test_all_categories_clean_with_complete_markers(self):
         result = self.scan()
