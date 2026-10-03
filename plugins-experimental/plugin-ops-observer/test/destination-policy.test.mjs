@@ -86,7 +86,7 @@ test("approved spelling and single root slash share normalized company cache wit
     assert.equal(seen.length, 1);
     assert.equal(seen[0].url, `${approved}/snapshot`);
     assert.equal(seen[0].options.method, "GET");
-    assert.equal(seen[0].options.redirect, "error");
+    assert.equal(seen[0].options.redirect, "manual");
     assert.deepEqual([...worker.cache.keys()], [JSON.stringify(["approved-company", approved])]);
   } finally { globalThis.fetch = originalFetch; worker.cache.clear(); }
 });

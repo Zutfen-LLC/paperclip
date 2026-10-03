@@ -102,6 +102,61 @@ test('disabled configuration cannot start or read telemetry and does not change 
   const fixture = await serve((_req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(snapshot)); });
   await transport(fixture, async () => { assert.deepEqual(Object.keys(await h.get('disabled')).sort(), ['fetchedAt', 'snapshot']); });
 });
+test('disabled snapshot interval invalidates the active window even after re-enable', async () => {
+  cache.clear(); let enabled = true;
+  const h = harness(() => ({ ...config, certificationEnabled: enabled }));
+  const fixture = await serve((_req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(snapshot)); });
+  try { await transport(fixture, async () => {
+    assert.equal((await h.read('toggle-snapshot', 'start')).status, 'active');
+    enabled = false;
+    await h.get('toggle-snapshot');
+    enabled = true;
+    const closed = await h.read('toggle-snapshot', 'close');
+    assert.equal(closed.status, 'incomplete');
+    assert.equal(closed.incompleteReason, 'certification_disabled');
+    assert.equal(closed.counters.acceptedOrigin, 0);
+    assert.equal((await h.read('toggle-snapshot', 'start')).status, 'active');
+  }); } finally { /* transport closes fixture */ }
+});
+test('disabled certification read invalidates only its own active company window', async () => {
+  let enabled = true;
+  const h = harness(companyId => ({ ...config, certificationEnabled: companyId === 'toggle-read' ? enabled : true }));
+  await h.read('toggle-read', 'start');
+  await h.read('unaffected', 'start');
+  enabled = false;
+  await assert.rejects(() => h.read('toggle-read'), /not enabled/);
+  enabled = true;
+  const closed = await h.read('toggle-read', 'close');
+  assert.equal(closed.status, 'incomplete');
+  assert.equal(closed.incompleteReason, 'certification_disabled');
+  assert.equal((await h.read('unaffected', 'close')).status, 'complete');
+});
+test('post-start snapshot config failure invalidates the window after request exits', async () => {
+  let broken = false;
+  const h = harness(async () => { if (broken) throw new Error(secret); return config; });
+  await h.read('config-failure', 'start');
+  broken = true;
+  await assert.rejects(() => h.get('config-failure'), /configuration unavailable/);
+  broken = false;
+  const closed = await h.read('config-failure', 'close');
+  assert.equal(closed.status, 'incomplete');
+  assert.equal(closed.incompleteReason, 'config_unavailable');
+  assert.equal(closed.inFlight, 0);
+  assert.equal(closed.counters.acceptedOrigin, 0);
+  assert.equal(JSON.stringify(closed).includes(secret), false);
+  assert.equal((await h.read('config-failure', 'start')).status, 'active');
+});
+test('post-start certification config failure invalidates its window', async () => {
+  let broken = false;
+  const h = harness(async () => { if (broken) throw new Error(secret); return config; });
+  await h.read('read-failure', 'start');
+  broken = true;
+  await assert.rejects(() => h.read('read-failure'), /configuration unavailable/);
+  broken = false;
+  const closed = await h.read('read-failure', 'close');
+  assert.equal(closed.status, 'incomplete');
+  assert.equal(closed.incompleteReason, 'config_unavailable');
+});
 test('bounded receipt and full fixture window remain free of credentials and header values', async () => {
   cache.clear();
   const fixture = await serve((_req, res) => { res.writeHead(502, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: secret })); });
