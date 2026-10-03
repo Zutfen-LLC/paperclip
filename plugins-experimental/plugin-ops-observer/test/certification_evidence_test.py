@@ -305,6 +305,39 @@ class ScannerTests(unittest.TestCase):
         self.put('cache_identifiers', {'receipt': self.cache_receipt()})
         self.assertEqual(self.scan()['status'], 'clean')
 
+    def test_complete_cache_receipt_cannot_claim_insertion_without_inspecting_it(self):
+        receipt = self.cache_receipt()
+        receipt['counters'].update(acceptedOrigin=1, cacheReads=1, cacheMisses=1,
+                                   fetchAttempts=1, fetchSuccesses=1, upstreamGet=1,
+                                   adapterAuthAttached=1)
+        receipt['cacheIdentifiers'].update(scans=4, reads=1, inserts=1)
+        # A successful insert is synchronously followed by a scan of the new key.
+        self.put('cache_identifiers', {'receipt': receipt})
+        with self.assertRaisesRegex(EvidenceError, 'cache_receipt_mismatch'):
+            self.scan()
+
+    def test_complete_cache_receipt_cannot_have_inspections_with_zero_digest(self):
+        receipt = self.cache_receipt()
+        receipt['cacheIdentifiers'].update(entriesInspected=1)
+        self.put('cache_identifiers', {'receipt': receipt})
+        with self.assertRaisesRegex(EvidenceError, 'cache_receipt_integrity'):
+            self.scan()
+
+    def test_complete_cache_receipt_allows_empty_rejection_and_hit_refresh_windows(self):
+        self.assertEqual(self.scan()['status'], 'clean')  # zero-fetch, empty cache
+        rejected = self.cache_receipt()
+        rejected['counters']['rejectedOrigin'] = 1
+        self.put('cache_identifiers', {'receipt': rejected})
+        self.assertEqual(self.scan()['status'], 'clean')
+        traffic = self.cache_receipt()
+        traffic['counters'].update(acceptedOrigin=3, cacheReads=3, cacheHits=1,
+                                   cacheMisses=1, cacheRefreshes=1, fetchAttempts=2,
+                                   fetchSuccesses=2, upstreamGet=2, adapterAuthAttached=2)
+        traffic['cacheIdentifiers'].update(scans=7, reads=3, inserts=2,
+                                           entriesInspected=5, digest='a' * 64)
+        self.put('cache_identifiers', {'receipt': traffic})
+        self.assertEqual(self.scan()['status'], 'clean')
+
     def test_cache_receipt_plaintext_positive_control(self):
         receipt = self.cache_receipt()
         self.put('cache_identifiers', {'receipt': receipt, 'unexpected': SECRET})
