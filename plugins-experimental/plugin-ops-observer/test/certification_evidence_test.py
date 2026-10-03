@@ -255,6 +255,47 @@ class ScannerTests(unittest.TestCase):
         source['bytes'] = len(raw)
         source['sha256'] = hashlib.sha256(raw).hexdigest()
 
+    def test_retained_original_manifest_all_fields_raw_and_decoded_no_echo(self):
+        escaped = ''.join('\\u%04x' % ord(char) for char in SECRET)
+        for field in ('startCursor', 'endCursor', 'unexpectedMetadata'):
+            for encoding in ('plain', 'escaped'):
+                with self.subTest(field=field, encoding=encoding):
+                    export = self.export_manifest()
+                    export['sources']['worker_logs']['coverage'][field] = SECRET
+                    manifest = self.root / ('manifest-' + field + '-' + encoding + '.json')
+                    raw = json.dumps(export).replace(SECRET, escaped if encoding == 'escaped' else SECRET)
+                    manifest.write_text(raw)
+                    destination = self.root / ('retained-' + field + '-' + encoding)
+                    cli = subprocess.run([sys.executable, '-B', str(ROOT / 'certification' / 'window_collector.py'),
+                                          str(manifest), str(destination)], text=True, capture_output=True, timeout=5)
+                    self.assertEqual(cli.returncode, 0, cli.stdout + cli.stderr)
+                    inventory = json.loads((destination / 'inventory.json').read_text())
+                    result = scan_inventory(inventory, [SECRET])
+                    self.assertEqual(result['status'], 'leak')
+                    self.assertGreater(result['categories']['worker_logs']['matches'], 0)
+                    scanner = subprocess.run([sys.executable, '-B', str(ROOT / 'certification' / 'window_scanner.py'),
+                                              str(destination / 'inventory.json')], input=json.dumps({'values': [SECRET]}),
+                                             text=True, capture_output=True, timeout=5)
+                    self.assertEqual(scanner.returncode, 1)
+                    self.assertNotIn(SECRET, cli.stdout + cli.stderr + scanner.stdout + scanner.stderr + json.dumps(result))
+
+    def test_retained_original_manifest_missing_or_modified_is_incomplete(self):
+        export = self.export_manifest()
+        manifest = self.root / 'retained-source.json'
+        manifest.write_text(json.dumps(export))
+        destination = self.root / 'retained-source'
+        cli = subprocess.run([sys.executable, '-B', str(ROOT / 'certification' / 'window_collector.py'),
+                              str(manifest), str(destination)], text=True, capture_output=True, timeout=5)
+        self.assertEqual(cli.returncode, 0)
+        inventory = json.loads((destination / 'inventory.json').read_text())
+        self.assertEqual(scan_inventory(inventory, [SECRET])['status'], 'clean')
+        manifest.write_text(json.dumps(export) + ' ')
+        with self.assertRaises(EvidenceError): scan_inventory(inventory, [SECRET])
+        manifest.unlink()
+        with self.assertRaises(EvidenceError): scan_inventory(inventory, [SECRET])
+        inventory.pop('exportManifest', None)
+        with self.assertRaises(EvidenceError): scan_inventory(inventory, [SECRET])
+
     def test_collector_unicode_escaped_json_and_log_lines_each_sink(self):
         escaped = ''.join('\\u%04x' % ord(char) for char in SECRET)
         for category in CATEGORIES:
