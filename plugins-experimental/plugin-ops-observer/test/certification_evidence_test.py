@@ -330,6 +330,23 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(json.loads(cli.stdout)['status'], 'leak')
         self.assertNotIn(SECRET, cli.stdout + cli.stderr)
 
+    def test_retained_inventory_raw_duplicate_key_and_literal_escape_are_leaks(self):
+        inventory = self.collect(self.export_manifest(), self.root / 'inventory-raw')
+        path = self.root / 'raw-inventory.json'
+        base = json.dumps(inventory)
+        for encoding, field in enumerate(('"obsolete":"' + SECRET + '",',
+                      '"obsolete":"' + ''.join('\\u%04x' % ord(char) for char in SECRET) + '",',
+                      '"obsolete":"' + ''.join('\\\\u%04x' % ord(char) for char in SECRET) + '",')):
+            with self.subTest(encoding=encoding):
+                # The first duplicate is erased by json.loads; raw bytes must still be inspected.
+                path.write_text('{' + field + '"obsolete":"safe",' + base[1:])
+                cli = subprocess.run([sys.executable, '-B', str(ROOT / 'certification' / 'window_scanner.py'),
+                                      str(path)], input=json.dumps({'values': [SECRET]}),
+                                     text=True, capture_output=True, timeout=5)
+                self.assertEqual(cli.returncode, 1, cli.stdout + cli.stderr)
+                self.assertEqual(json.loads(cli.stdout)['status'], 'leak')
+                self.assertNotIn(SECRET, cli.stdout + cli.stderr)
+
     def test_retained_original_manifest_all_fields_raw_and_decoded_no_echo(self):
         escaped = ''.join('\\u%04x' % ord(char) for char in SECRET)
         for field in ('startCursor', 'endCursor', 'unexpectedMetadata', 'sourceMetadata', 'topLevelMetadata'):

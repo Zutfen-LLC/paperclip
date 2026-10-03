@@ -89,7 +89,7 @@ def _matches(value, patterns):
             _reject('decoded_structure_limit')
         if isinstance(item, dict):
             stack.extend((child, depth + 1) for pair in item.items() for child in pair)
-        elif isinstance(item, list):
+        elif isinstance(item, (list, tuple)):
             stack.extend((child, depth + 1) for child in item)
         elif isinstance(item, str):
             if len(item) > MAX_SOURCE_BYTES:
@@ -128,8 +128,22 @@ def _export_matches(text, patterns):
             _reject('invalid_export_json')
     return max(_matches(text, patterns), sum(_matches(doc, patterns) for doc in documents))
 
+def _retained_matches(raw, decoded, patterns, limit, reason):
+    """Bound and scan a complete retained JSON representation, including keys and paths."""
+    if not raw or len(raw) > limit:
+        _reject(reason)
+    try:
+        text = raw.decode('utf-8')
+        # Keep every duplicate key/value that ordinary dict decoding discards.
+        all_fields = json.loads(text, object_pairs_hook=lambda pairs: pairs)
+    except (UnicodeError, ValueError, RecursionError):
+        _reject(reason)
+    return max(sum(raw.count(pattern) for pattern in patterns),
+               _matches(text, patterns), _matches(decoded, patterns),
+               _matches(all_fields, patterns))
+
 def _read_verified(reference, limit, reason):
-    if (not isinstance(reference, dict) or set(reference) != MANIFEST_REFERENCE_FIELDS
+    if (not isinstance(reference, dict) or not MANIFEST_REFERENCE_FIELDS <= set(reference)
         or not isinstance(reference.get('path'), str) or not reference['path']
         or type(reference.get('bytes')) is not int or not 1 <= reference['bytes'] <= limit
         or not isinstance(reference.get('sha256'), str) or len(reference['sha256']) != 64
@@ -144,11 +158,12 @@ def _read_verified(reference, limit, reason):
     return raw
 
 
-def scan_inventory(inventory, values, *, max_source_bytes=MAX_SOURCE_BYTES, max_records=MAX_RECORDS):
+def scan_inventory(inventory, values, *, max_source_bytes=MAX_SOURCE_BYTES, max_records=MAX_RECORDS,
+                   inventory_raw=None):
     """Require every category's digest, size, coverage and ordered start/end markers."""
     if not isinstance(inventory, dict) or inventory.get('schema') != 'ops_observer_window_inventory_v1':
         _reject('invalid_inventory')
-    if set(inventory) != INVENTORY_FIELDS:
+    if not INVENTORY_FIELDS <= set(inventory):
         _reject('invalid_inventory')
     sources = inventory.get('sources')
     if not isinstance(sources, dict) or set(sources) != set(CATEGORIES):
@@ -163,14 +178,16 @@ def scan_inventory(inventory, values, *, max_source_bytes=MAX_SOURCE_BYTES, max_
     if not 1 <= max_source_bytes <= MAX_SOURCE_BYTES or not 2 <= max_records <= MAX_RECORDS:
         _reject('invalid_limit')
     patterns = [v.encode('utf-8') for v in set(values)]
-    # This is itself a persisted receipt. Bound it even for direct API callers,
-    # and scan every retained field, not just source record payloads.
+    # The actual CLI bytes may contain escapes or duplicate keys erased by
+    # JSON parsing. Direct callers get a bounded serialized representation.
     try:
         metadata_bytes = json.dumps(inventory, ensure_ascii=False).encode('utf-8')
     except (ValueError, TypeError, UnicodeError, RecursionError):
         _reject('invalid_inventory')
-    if len(metadata_bytes) > 1024 * 1024:
-        _reject('inventory_limit')
+    inventory_matches = _retained_matches(metadata_bytes, inventory, patterns, 1024 * 1024, 'inventory_limit')
+    if inventory_raw is not None:
+        inventory_matches = max(inventory_matches, _retained_matches(
+            inventory_raw, inventory, patterns, 1024 * 1024, 'inventory_limit'))
     manifest_raw = _read_verified(inventory['exportManifest'], 1024 * 1024, 'export_manifest_integrity')
     try:
         manifest_text = manifest_raw.decode('utf-8')
@@ -185,15 +202,14 @@ def scan_inventory(inventory, values, *, max_source_bytes=MAX_SOURCE_BYTES, max_
     # Include every original field, even fields the collector intentionally
     # does not carry into its sanitized inventory. Check original raw bytes,
     # parsed JSON, and the scanner's bounded Unicode-escape layer.
-    manifest_matches = max(sum(manifest_raw.count(p) for p in patterns),
-                           _matches(manifest_text, patterns), _matches(original, patterns))
-    window_matches = _matches(window, patterns)
+    manifest_matches = _retained_matches(manifest_raw, original, patterns, 1024 * 1024,
+                                         'export_manifest_integrity')
     categories = {}
     for category in CATEGORIES:
         source = sources[category]
-        if not isinstance(source, dict) or set(source) != SOURCE_FIELDS: _reject('invalid_source')
+        if not isinstance(source, dict) or not SOURCE_FIELDS <= set(source): _reject('invalid_source')
         coverage = source.get('coverage')
-        if (not isinstance(coverage, dict) or set(coverage) != COVERAGE_FIELDS
+        if (not isinstance(coverage, dict) or not COVERAGE_FIELDS <= set(coverage)
             or coverage.get('startedAt') != start
             or coverage.get('endedAt') != end or coverage.get('complete') is not True
             or coverage.get('truncated') is not False or coverage.get('overflow') is not False
@@ -250,7 +266,9 @@ def scan_inventory(inventory, values, *, max_source_bytes=MAX_SOURCE_BYTES, max_
             or records[0].get('at') != start or records[-1].get('at') != end):
             _reject('marker_mismatch')
         last_at = start
-        metadata_matches = _matches(source, patterns) + (window_matches + manifest_matches if category == CATEGORIES[0] else 0)
+        # Attribute global inventory/manifest hits to one fixed category;
+        # never include a retained pathname or arbitrary key in the result.
+        metadata_matches = inventory_matches + manifest_matches if category == CATEGORIES[0] else 0
         export_matches = 0
         for index, record in enumerate(records):
             if not isinstance(record, dict): _reject('invalid_record')
@@ -282,11 +300,12 @@ def main():
         if len(sys.argv) != 2: _reject('usage')
         inventory_path = Path(sys.argv[1])
         if inventory_path.stat().st_size > 1024 * 1024: _reject('inventory_limit')
-        inventory = json.loads(inventory_path.read_text(encoding='utf-8'))
+        inventory_raw = inventory_path.read_bytes()
+        inventory = json.loads(inventory_raw.decode('utf-8'))
         private = sys.stdin.buffer.read(128 * 1024 + 1)
         if len(private) > 128 * 1024: _reject('private_input_limit')
         values = json.loads(private.decode('utf-8'))['values']
-        result = scan_inventory(inventory, values)
+        result = scan_inventory(inventory, values, inventory_raw=inventory_raw)
     except (EvidenceError, OSError, KeyError, TypeError, ValueError, UnicodeError, RecursionError) as exc:
         # Fixed, bounded reason only; even JSON errors and paths can contain secrets.
         reason = str(exc) if isinstance(exc, EvidenceError) else 'invalid_input'

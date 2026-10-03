@@ -298,18 +298,25 @@ plaintext absence.
    inventory. CLI stdout contains only fixed classifications, counts, category
    names, byte counts and digests; it does not echo paths, matches or values.
 
-Scanner bounds: eight mandatory sink sources plus the <=1 MiB original manifest,
+Scanner bounds: eight mandatory sink sources plus the <=1 MiB original manifest
+and <=1 MiB retained inventory,
 each sink <=4 MiB / 10,000 ordered records,
 all contiguous sequence numbers, start/data/end markers and time bounds,
 source SHA-256/byte equality, no missing or false-complete flags, <=32 private
-values of <=4 KiB each. It scans raw UTF-8 bytes, decoded JSON documents and
-newline-delimited JSON exports (including one bounded Unicode-escape layer),
-and all retained inventory/coverage metadata and every field of the verified
-original manifest (including cursor and unexpected metadata) in raw and
-decoded form. It rechecks the original manifest's and source files' bytes and
-digests and their linkage to wrapped exports. Malformed JSON-looking exports,
-excessive nesting, and unexpected inventory fields return incomplete rather
-than clean; opaque non-JSON text is scanned as text. It reports no snippets.
+values of <=4 KiB each. It scans the entire retained inventory (including
+its manifest reference filename, every source path, every metadata key/value,
+and unexpected fields) as raw UTF-8 and decoded JSON, preserving duplicate
+keys for hygiene scanning. It scans the verified original manifest in the
+same way, and scans raw UTF-8 bytes, decoded JSON documents and
+newline-delimited JSON exports (including one bounded Unicode-escape layer).
+Extra inventory metadata cannot conceal a leak; required structural fields
+and categories remain mandatory. It rechecks the original manifest's and
+source files' bytes and digests and their linkage to wrapped exports. Missing
+or modified references, malformed JSON-looking exports, excessive nesting,
+and exceeded bounds return incomplete rather than clean; opaque non-JSON text
+is scanned as text. Results contain counts, fixed categories and digests,
+never retained pathnames, snippets or private values. Neither a clean scan
+nor an inventory path proves the operator's cursors are truthful.
 The digest/marker validation proves integrity of
 *supplied* exports, **not** that an external collector actually captured every
 production stream or that its cursors truthfully cover the interval. External
