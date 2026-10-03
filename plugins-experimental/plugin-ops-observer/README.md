@@ -91,14 +91,19 @@ caller uses the existing scoped plugin data bridge:
 - `status: "complete"` only when explicitly closed before expiry, without
   overlapping requests. `status: "active"` is not final evidence;
   `status: "incomplete"` means an in-flight request overlapped close/start, the
-  five-minute limit expired, or the 10,000-event budget overflowed. Never call
+  five-minute limit expired, the 10,000-event budget overflowed, or config was
+  unavailable/disabled during an active window (whether observed by snapshot
+  or certification read). Disable then re-enable cannot restore that window;
+  a fresh `start` is required after invalidation. Never call
   an incomplete receipt a full-window result. In-flight requests begun before
   `start` invalidate that window. Re-reading a closed receipt is supported until
   replaced by another start or worker restart; the worker retains at most one
   receipt per company and at most 64 companies per process. A restart loses
   this volatile evidence; there is no persistent receipt store.
 
-Receipt shape: `schema`, `status`, `startedAt`, `endedAt` (number/null),
+Receipt shape: `schema`, `status`, `incompleteReason` (null or one of
+`request_overlap`, `window_expired`, `event_limit`, `certification_disabled`,
+`config_unavailable`), `startedAt`, `endedAt` (number/null),
 `inFlight`, `counters`, `upstreamMethod` (`GET`/`none`), and
 `adapterAuthHeaderAttached` (boolean). Counters: `acceptedOrigin`,
 `rejectedOrigin`, `secretResolutionAttempts`, `secretResolutionFailures`,

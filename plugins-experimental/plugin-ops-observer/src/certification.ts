@@ -8,10 +8,12 @@ const names = [
   "fetchSuccesses", "fetchFailures", "redirectRefusals", "upstreamGet", "adapterAuthAttached",
 ] as const;
 type Name = typeof names[number];
+type IncompleteReason = "request_overlap" | "window_expired" | "event_limit" | "certification_disabled" | "config_unavailable";
 type Window = {
   startedAt: number;
   endedAt?: number;
   status: "active" | "complete" | "incomplete";
+  incompleteReason?: IncompleteReason;
   events: number;
   counters: Record<Name, number>;
 };
@@ -21,6 +23,7 @@ const pending = new Map<string, number>();
 function expire(window: Window) {
   if (window.status === "active" && Date.now() - window.startedAt >= WINDOW_MS) {
     window.status = "incomplete";
+    window.incompleteReason = "window_expired";
     window.endedAt = window.startedAt + WINDOW_MS;
   }
 }
@@ -29,6 +32,7 @@ function receipt(window: Window, companyId: string) {
   return {
     schema: "ops_observer_certification_v1" as const,
     status: window.status,
+    incompleteReason: window.incompleteReason ?? null,
     startedAt: window.startedAt,
     endedAt: window.endedAt ?? null,
     inFlight: pending.get(companyId) ?? 0,
@@ -46,7 +50,7 @@ export function certificationWindow(companyId: string, command?: unknown) {
     const counters = Object.fromEntries(names.map(name => [name, 0])) as Record<Name, number>;
     const window: Window = { startedAt: Date.now(), status: "active", events: 0, counters };
     // An earlier request overlaps the start, so the entire window cannot be certified.
-    if ((pending.get(companyId) ?? 0) > 0) { window.status = "incomplete"; window.endedAt = Date.now(); }
+    if ((pending.get(companyId) ?? 0) > 0) { window.status = "incomplete"; window.incompleteReason = "request_overlap"; window.endedAt = Date.now(); }
     windows.set(companyId, window);
     return receipt(window, companyId);
   }
@@ -56,11 +60,24 @@ export function certificationWindow(companyId: string, command?: unknown) {
   expire(window);
   if (command === "close" && window.status === "active") {
     window.status = (pending.get(companyId) ?? 0) === 0 ? "complete" : "incomplete";
+    if (window.status === "incomplete") window.incompleteReason = "request_overlap";
     window.endedAt = Date.now();
   }
   return receipt(window, companyId);
 }
+// Fail closed only for the company's currently active window. Closed evidence
+// is immutable, and unrelated company windows must not be affected.
+export function invalidateCertification(companyId: string, reason: "certification_disabled" | "config_unavailable") {
+  const window = windows.get(companyId);
+  if (!window) return;
+  expire(window);
+  if (window.status !== "active") return;
+  window.status = "incomplete";
+  window.incompleteReason = reason;
+  window.endedAt = Date.now();
+}
 export function observeRequest(companyId: string, enabled: boolean) {
+  if (!enabled) invalidateCertification(companyId, "certification_disabled");
   const window = enabled ? windows.get(companyId) : undefined;
   if (window) expire(window);
   const active = window?.status === "active" ? window : undefined;
@@ -71,6 +88,7 @@ export function observeRequest(companyId: string, enabled: boolean) {
       if (active.status !== "active") return;
       if (active.events >= MAX_EVENTS) {
         active.status = "incomplete";
+        active.incompleteReason = "event_limit";
         active.endedAt = Date.now();
         return;
       }

@@ -1,7 +1,7 @@
 import { definePlugin, runWorker } from "@paperclipai/plugin-sdk";
 import type { EnvSecretRefBinding } from "@paperclipai/plugin-sdk";
 import { CACHE_TTL_MS, DATA_KEYS } from "./constants.js";
-import { certificationWindow, observeRequest, requestStarted } from "./certification.js";
+import { certificationWindow, invalidateCertification, observeRequest, requestStarted } from "./certification.js";
 
 /**
  * Ops Supervisor read-only observer worker.
@@ -106,8 +106,14 @@ const plugin = definePlugin({
       if (!companyId) throw new Error("Company scope is required");
       let config: Record<string, unknown>;
       try { config = await ctx.config.get(companyId); }
-      catch { throw new Error("Ops snapshot configuration unavailable (fail closed)"); }
-      if (config.certificationEnabled !== true) throw new Error("Certification not enabled");
+      catch {
+        invalidateCertification(companyId, "config_unavailable");
+        throw new Error("Ops snapshot configuration unavailable (fail closed)");
+      }
+      if (config.certificationEnabled !== true) {
+        invalidateCertification(companyId, "certification_disabled");
+        throw new Error("Certification not enabled");
+      }
       return certificationWindow(companyId, params?.command);
     });
     ctx.data.register(DATA_KEYS.snapshot, async (params) => {
@@ -120,6 +126,7 @@ const plugin = definePlugin({
         try {
           config = await ctx.config.get(companyId);
         } catch {
+          invalidateCertification(companyId, "config_unavailable");
           throw new Error("Ops snapshot configuration unavailable (fail closed)");
         }
         evidence = observeRequest(companyId, config.certificationEnabled === true);
