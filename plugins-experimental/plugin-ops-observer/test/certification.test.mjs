@@ -209,3 +209,63 @@ test('concurrent close is incomplete and bounded window expires incomplete', asy
     try { assert.equal((await h.read('expiry')).status, 'incomplete'); } finally { Date.now = old; }
   }); } finally { if (release) release(); }
 });
+
+for (const outcome of ['disabled', 'failed']) {
+  test(`overlapping certification config read ${outcome} cannot leave a complete receipt`, async () => {
+    let release;
+    let hold = false;
+    const h = harness(() => hold ? new Promise((resolve, reject) => {
+      release = () => outcome === 'disabled'
+        ? resolve({ ...config, certificationEnabled: false }) : reject(new Error(secret));
+    }) : config);
+    await h.read(`overlap-${outcome}`, 'start');
+    hold = true;
+    const pending = h.read(`overlap-${outcome}`);
+    assert.equal(typeof release, 'function');
+    hold = false;
+    const closed = await h.read(`overlap-${outcome}`, 'close');
+    assert.equal(closed.status, 'incomplete');
+    assert.equal(closed.incompleteReason, 'request_overlap');
+    assert.equal(closed.inFlight, 1);
+    release();
+    await assert.rejects(pending, outcome === 'disabled' ? /not enabled/ : /configuration unavailable/);
+    const reread = await h.read(`overlap-${outcome}`);
+    assert.deepEqual(reread, closed);
+    assert.equal(JSON.stringify(reread).includes(secret), false);
+  });
+}
+
+test('opening during an earlier certification config read remains incomplete after resolution', async () => {
+  let release;
+  let hold = true;
+  const h = harness(() => hold ? new Promise(resolve => { release = () => resolve(config); }) : config);
+  const prior = h.read('prior-read');
+  hold = false;
+  const opened = await h.read('prior-read', 'start');
+  assert.equal(opened.status, 'incomplete');
+  assert.equal(opened.incompleteReason, 'request_overlap');
+  assert.equal(opened.inFlight, 1);
+  release();
+  await assert.rejects(prior, /No certification window/);
+  assert.deepEqual(await h.read('prior-read', 'close'), opened);
+});
+
+test('completed receipt stays fixed while a later snapshot config lookup is pending', async () => {
+  let release;
+  let hold = false;
+  const h = harness(() => hold ? new Promise(resolve => {
+    release = () => resolve({ ...config, adapterBaseUrl: 'http://127.0.0.1:18488' });
+  }) : config);
+  await h.read('stable-complete', 'start');
+  const closed = await h.read('stable-complete', 'close');
+  assert.equal(closed.status, 'complete');
+  assert.equal(closed.inFlight, 0);
+  hold = true;
+  const pending = h.get('stable-complete');
+  hold = false;
+  assert.equal(typeof release, 'function');
+  assert.deepEqual(await h.read('stable-complete'), closed);
+  release();
+  await assert.rejects(pending, /destination not approved/);
+  assert.deepEqual(await h.read('stable-complete'), closed);
+});
