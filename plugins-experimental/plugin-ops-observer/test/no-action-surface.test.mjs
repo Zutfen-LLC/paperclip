@@ -1,0 +1,7 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import {fileURLToPath} from "node:url";
+import path from "node:path";
+const dir=path.dirname(fileURLToPath(import.meta.url));
+test("worker registers data only and shipped UI/manifest expose no action surface",async()=>{const mod=await import("../dist/worker.js");const plugin=(mod.default??mod).definition;const counts={data:0,actions:0,events:0,jobs:0,webhooks:0,launchers:0};plugin.setup({config:{get:async()=>({})},data:{register:()=>counts.data++},actions:{register:()=>counts.actions++},events:{on:()=>counts.events++},jobs:{register:()=>counts.jobs++},webhooks:{register:()=>counts.webhooks++},launchers:{register:()=>counts.launchers++},logger:{info(){},warn(){},error(){}}});assert.ok(counts.data>0);for(const key of ["actions","events","jobs","webhooks","launchers"])assert.equal(counts[key],0);const ui=fs.readFileSync(path.join(dir,"../dist/ui/index.js"),"utf8");assert.doesNotMatch(ui,/ctx\.actions|registerAction|actionHandler|mutation|fetch\(/);const testExport=fs.readFileSync(path.join(dir,"../dist-test/ui/test-export.js"),"utf8");assert.doesNotMatch(testExport,/ctx\.|fetch\(/);assert.equal((testExport.match(/fetch\(/g)??[]).length,0);const manifest=(await import("../dist/manifest.js")).default;assert.deepEqual(new Set(manifest.capabilities),new Set(["http.outbound","ui.page.register","secrets.read-ref"]));});

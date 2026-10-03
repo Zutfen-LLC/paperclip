@@ -34,15 +34,10 @@ mechanically-proven read-only scope.
 `adapterToken` declares the host's `format: "secret-ref"` config schema and is stored as a `{ type: "secret_ref", secretId, version? }` binding. The worker resolves that binding with `ctx.secrets.resolve(binding, { companyId, configPath: "adapterToken" })`; the manifest requests only the SDK's `secrets.read-ref` capability. New config writes require the object reference and reject plaintext or bare UUID strings. The worker can still read a previously stored plaintext token for compatibility; that path is unprotected plaintext config and is NOT equivalent to secret-ref certification. Existing config is not migrated by this source change. Host config reads return the stored company-scoped config; secret resolution is an explicit SDK call, not an implicit `ctx.config.get` behavior.
 
 
-`ops_work_snapshot_v1` items: project/repo, issue number/title/state,
-Ops lifecycle + execution state, run id, review state, PR number/head SHA,
-reviewed (GO) SHA, base SHA, qualification state, blocker, token usage,
-timestamps, source links, and per-item provenance (Ops deployed SHA,
-source endpoints, fetch time). Missing values render as explicit
-`unknown` — never inferred.
+## UI / presentation
 
-No actions are registered: the UI has no retry/approve/stop/merge/assign
-buttons because the worker registers no action handlers at all.
+The operator surface is a read-only presentation of the `ops_work_snapshot_v1` envelope. `src/ui/model.ts` is a pure presentation model: it validates envelopes, separates active work, human attention, and recent outcomes, and provides deterministic filtering and labels. The UI presents those three sections with search/scope/recency/project filters, explicit loading/error/malformed/stale and empty states, and accessible tables, labels, status announcements, and detail controls. The worker remains unchanged; the UI adds no requests, actions, mutation controls, or authority. Missing values remain explicit as `unknown` and are never inferred.
+
 
 ## Pinned destination trust boundary
 
