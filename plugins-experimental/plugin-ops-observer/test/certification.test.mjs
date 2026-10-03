@@ -339,6 +339,15 @@ test('worker scans resolved plaintext against valid-shaped live identifiers with
   cache.clear();
 });
 
+test('multibyte cache identifier over 4 KiB fails the bounded inventory', async () => {
+  cache.clear(); const companyId = '☃'.repeat(2000);
+  cache.set(JSON.stringify([companyId, origin]), { fetchedAt: Date.now(), snapshot });
+  const receipt = await harness().read(companyId, 'start');
+  assert.equal(receipt.status, 'incomplete');
+  assert.equal(receipt.incompleteReason, 'cache_inventory_limit');
+  cache.clear();
+});
+
 test('oversize cache inventory cannot claim complete and does not disclose identifiers', async () => {
   cache.clear();
   const h = harness();
