@@ -11,6 +11,6 @@ export function OpsWorkPage():JSX.Element {
  useEffect(()=>{const t=setInterval(()=>setNow(Date.now()),5000);return()=>clearInterval(t);},[]);
  const state:UiState=loading&&!data?{kind:"loading"}:error&&!data?{kind:"error"}:parseEnvelope(data,now);
  const rows=useMemo(()=>{if(state.kind!=="ready")return {active:[],attention:[],outcomes:[]};const vm=buildViewModel(state.envelope.snapshot.items,{now});return {active:applyFilters(vm.active,filters,now),attention:applyFilters(vm.attention,filters,now),outcomes:applyFilters(vm.outcomes,filters,now)};},[state,filters,now]);
- return <OpsWorkView state={state} rows={rows} filters={filters} onFilters={setFilters} selectedId={selectedId} onSelect={setSelectedId} onRefresh={()=>void refresh()} loading={loading} now={now}/>;
+ return <OpsWorkView state={state} rows={rows} filters={filters} onFilters={setFilters} selectedId={selectedId} onSelect={setSelectedId} onRefresh={()=>void refresh()} loading={loading} now={now} items={state.kind==="ready"?state.envelope.snapshot.items:[]} refreshFailed={Boolean(error&&data)}/>;
 }
 export default OpsWorkPage;
