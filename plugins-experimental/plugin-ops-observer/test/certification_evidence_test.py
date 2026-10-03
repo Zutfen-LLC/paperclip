@@ -1,9 +1,12 @@
 """Isolated slice-B tests: no production services or live cross-integration."""
 import hashlib
 import json
+import logging
+import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -14,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'certification'))
 from adapter_evidence import AdapterEvidence, load_pinned_adapter, PinnedAdapterError
 from window_scanner import CATEGORIES, EvidenceError, scan_inventory
+from window_collector import collect_inventory
 
 ADAPTER = Path('/home/zutfen/ops-v2/observer-issue-3/scripts/ops_readonly_adapter.py')
 SECRET = 'private-token-sentinel-issue10'
@@ -89,6 +93,9 @@ class AdapterTests(unittest.TestCase):
             self.assertEqual(self.request('wrong'), 401)
             self.assertEqual(Fixture.hits, [])
             self.assertEqual(self.request(SECRET), 200)
+            deadline = time.monotonic() + 2
+            while evidence.report['inFlight'] and time.monotonic() < deadline:
+                time.sleep(0.001)
             report = evidence.close()
         self.assertEqual(report['status'], 'complete')
         self.assertEqual(report['authRejected'], 1)
@@ -111,6 +118,11 @@ class AdapterTests(unittest.TestCase):
             def do_GET(self): target_hits.append(1); self.send_response(200); self.end_headers()
             def log_message(self, *_): pass
         target = Server(Target)
+        captured = []
+        class Capture(logging.Handler):
+            def emit(self, record): captured.append(self.format(record))
+        sink = Capture()
+        self.module.LOG.addHandler(sink)
         try:
             Fixture.redirect = target.url + '/leak?token=' + SECRET
             with AdapterEvidence(self.module) as evidence:
@@ -121,7 +133,25 @@ class AdapterTests(unittest.TestCase):
             self.assertEqual(report['opsAttempts'], 1)
             self.assertEqual(report['opsFailures'], 1)
             self.assertNotIn(SECRET, json.dumps(report))
-        finally: target.close()
+            self.assertNotIn(SECRET, json.dumps(captured))
+            self.assertNotIn(LEAK, json.dumps(captured))
+            self.assertNotIn('/leak?token=', json.dumps(captured))
+        finally:
+            self.module.LOG.removeHandler(sink)
+            target.close()
+
+    def test_hook_refuses_unpinned_or_concurrent_module_context(self):
+        with self.assertRaises(PinnedAdapterError): AdapterEvidence(object())
+        with AdapterEvidence(self.module):
+            with self.assertRaises(RuntimeError):
+                with AdapterEvidence(self.module): pass
+
+    def test_expired_window_refuses_complete(self):
+        with AdapterEvidence(self.module, max_seconds=300) as evidence:
+            evidence.started -= 301
+            receipt = evidence.close()
+        self.assertEqual(receipt['status'], 'incomplete')
+        self.assertEqual(receipt['incompleteReason'], 'window_expired')
 
     def test_overlap_and_event_cap_cannot_be_complete(self):
         with AdapterEvidence(self.module, max_events=1) as evidence:
@@ -190,13 +220,49 @@ class ScannerTests(unittest.TestCase):
             self.inventory = saved
             source = self.inventory['sources']['worker_logs']
         self.put('worker_logs', {'ordinary': 'safe'})
+        source = self.inventory['sources']['worker_logs']
         p = Path(source['path'])
         for records in [[], [{'seq': 0, 'at': 100, 'kind': 'start', 'payload': {}}],
+                        [{'seq': 0, 'at': 100, 'kind': 'start', 'payload': {}},
+                         {'seq': 1, 'at': 200, 'kind': 'end', 'payload': {}}],
                         [{'seq': 0, 'at': 100, 'kind': 'start', 'payload': {}},
                          {'seq': 2, 'at': 200, 'kind': 'end', 'payload': {}}]]:
             raw = json.dumps({'window': 'isolated-1', 'records': records}).encode()
             p.write_bytes(raw); source['bytes'] = len(raw); source['sha256'] = hashlib.sha256(raw).hexdigest()
             with self.assertRaises(EvidenceError): self.scan()
+
+    def test_cli_private_stdin_never_echoes_leak_or_path(self):
+        self.put('errors', {'nested': {'value': SECRET}})
+        inventory = self.root / 'inventory.json'
+        inventory.write_text(json.dumps(self.inventory))
+        result = subprocess.run([sys.executable, '-B', str(ROOT / 'certification' / 'window_scanner.py'),
+                                 str(inventory)], input=json.dumps({'values': [SECRET, LEAK]}),
+                                text=True, capture_output=True, timeout=5)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(json.loads(result.stdout)['status'], 'leak')
+        self.assertNotIn(SECRET, result.stdout + result.stderr)
+        self.assertNotIn(str(self.root), result.stdout + result.stderr)
+
+    def test_collector_ingests_actual_export_files_and_rejects_unattested_or_overflow(self):
+        export = {'schema': 'ops_observer_export_v1', 'window': 'isolated-1',
+                  'startedAt': 100, 'endedAt': 200, 'sources': {}}
+        for category in CATEGORIES:
+            path = self.root / ('raw-' + category)
+            raw = json.dumps({'events': [], 'note': 'actually exported'}).encode()
+            path.write_bytes(raw)
+            export['sources'][category] = {'path': str(path), 'bytes': len(raw),
+              'sha256': hashlib.sha256(raw).hexdigest(), 'coverage': {
+                'startedAt': 100, 'endedAt': 200, 'complete': True, 'truncated': False,
+                'overflow': False, 'collector': 'operator-export', 'startCursor': 'before', 'endCursor': 'after'}}
+        result = collect_inventory(export, self.root / 'collected')
+        self.assertEqual(scan_inventory(result, [SECRET])['status'], 'clean')
+        export['sources']['worker_logs']['coverage']['startCursor'] = ''
+        with self.assertRaises(EvidenceError): collect_inventory(export, self.root / 'bad')
+        export['sources']['worker_logs']['coverage']['startCursor'] = 'before'
+        (self.root / 'raw-worker_logs').write_bytes(b'Z' * export['sources']['worker_logs']['bytes'])
+        with self.assertRaises(EvidenceError): collect_inventory(export, self.root / 'changed')
+        (self.root / 'raw-worker_logs').write_bytes(b'X' * (4 * 1024 * 1024 + 1))
+        with self.assertRaises(EvidenceError): collect_inventory(export, self.root / 'overflow')
 
     def test_marker_race_and_finite_limit_refused(self):
         source = self.inventory['sources']['telemetry']
