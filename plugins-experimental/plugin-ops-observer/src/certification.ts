@@ -100,7 +100,7 @@ export function scanCacheIdentifiers(companyId: string, keys: Iterable<string>,
   if (operation === "insert") inventory.inserts++;
   let visited = 0;
   for (const key of keys) {
-    if (++visited > MAX_EVENTS || inventory.entriesInspected >= MAX_EVENTS || key.length > 4096) {
+    if (++visited > MAX_EVENTS || inventory.entriesInspected >= MAX_EVENTS || Buffer.byteLength(key, "utf8") > 4096) {
       finish(window, companyId, "incomplete", "cache_inventory_limit"); return;
     }
     let parts: unknown;
