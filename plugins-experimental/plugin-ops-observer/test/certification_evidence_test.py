@@ -270,6 +270,66 @@ class ScannerTests(unittest.TestCase):
         manifest_path.write_text(json.dumps(export))
         return collect_inventory(export, destination, manifest_path)
 
+    def assert_private_inventory_leak(self, inventory, value=SECRET):
+        result = scan_inventory(inventory, [value])
+        self.assertEqual(result['status'], 'leak')
+        self.assertGreater(sum(item['matches'] for item in result['categories'].values()), 0)
+        self.assertNotIn(value, json.dumps(result))
+        path = self.root / 'private-inventory.json'
+        path.write_text(json.dumps(inventory))
+        cli = subprocess.run([sys.executable, '-B', str(ROOT / 'certification' / 'window_scanner.py'),
+                              str(path)], input=json.dumps({'values': [value]}),
+                             text=True, capture_output=True, timeout=5)
+        self.assertEqual(cli.returncode, 1, cli.stdout + cli.stderr)
+        self.assertEqual(json.loads(cli.stdout)['status'], 'leak')
+        self.assertNotIn(value, cli.stdout + cli.stderr)
+        self.assertNotIn(str(self.root), cli.stdout + cli.stderr)
+
+    def test_retained_inventory_extra_field_and_metadata_key_are_leaks(self):
+        for mutation in (lambda inventory: inventory.update(unexpected={'nested': SECRET}),
+                         lambda inventory: inventory['sources']['worker_logs']['coverage'].update({SECRET: 'safe'})):
+            with self.subTest(mutation=mutation):
+                inventory = self.collect(self.export_manifest(), self.root / ('metadata-' + str(len(list(self.root.iterdir())))))
+                mutation(inventory)
+                self.assert_private_inventory_leak(inventory)
+
+    def test_retained_original_manifest_filename_is_a_leak(self):
+        export = self.export_manifest()
+        path = self.root / ('manifest-' + SECRET + '.json')
+        path.write_text(json.dumps(export))
+        inventory = collect_inventory(export, self.root / 'manifest-path', path)
+        self.assert_private_inventory_leak(inventory)
+        path.write_text(json.dumps(export) + ' ')
+        with self.assertRaises(EvidenceError): scan_inventory(inventory, [SECRET])
+        path.unlink()
+        with self.assertRaises(EvidenceError): scan_inventory(inventory, [SECRET])
+
+    def test_retained_source_filenames_are_leaks(self):
+        export = self.export_manifest()
+        source = export['sources']['worker_logs']
+        original = Path(source['path'])
+        renamed = self.root / ('source-' + SECRET + '.json')
+        original.rename(renamed)
+        source['path'] = str(renamed)
+        inventory = self.collect(export, self.root / 'source-path')
+        self.assert_private_inventory_leak(inventory)
+        clean_export = self.export_manifest()
+        wrapped = self.collect(clean_export, self.root / ('wrapped-' + SECRET))
+        self.assert_private_inventory_leak(wrapped)
+
+    def test_retained_inventory_escaped_json_string_is_a_leak(self):
+        inventory = self.collect(self.export_manifest(), self.root / 'inventory-escaped')
+        inventory['extra'] = SECRET
+        path = self.root / 'escaped-inventory.json'
+        escaped = ''.join('\\u%04x' % ord(char) for char in SECRET)
+        path.write_text(json.dumps(inventory).replace(SECRET, escaped))
+        cli = subprocess.run([sys.executable, '-B', str(ROOT / 'certification' / 'window_scanner.py'),
+                              str(path)], input=json.dumps({'values': [SECRET]}),
+                             text=True, capture_output=True, timeout=5)
+        self.assertEqual(cli.returncode, 1, cli.stdout + cli.stderr)
+        self.assertEqual(json.loads(cli.stdout)['status'], 'leak')
+        self.assertNotIn(SECRET, cli.stdout + cli.stderr)
+
     def test_retained_original_manifest_all_fields_raw_and_decoded_no_echo(self):
         escaped = ''.join('\\u%04x' % ord(char) for char in SECRET)
         for field in ('startCursor', 'endCursor', 'unexpectedMetadata', 'sourceMetadata', 'topLevelMetadata'):
@@ -379,9 +439,7 @@ class ScannerTests(unittest.TestCase):
         self.assertGreater(result['categories']['worker_logs']['matches'], 0)
         self.assertNotIn(SECRET, json.dumps(result))
         inventory['extra'] = SECRET
-        with self.assertRaises(EvidenceError) as ctx:
-            scan_inventory(inventory, [SECRET])
-        self.assertNotIn(SECRET, str(ctx.exception))
+        self.assert_private_inventory_leak(inventory)
 
     def test_collector_malformed_or_deep_json_is_incomplete_without_echo(self):
         for index, raw in enumerate((b'{"event":"\\u0070"', b'[' * 64 + b'0' + b']' * 64)):
