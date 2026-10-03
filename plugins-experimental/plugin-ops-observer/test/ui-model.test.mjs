@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseEnvelope, humanAttention, outcomeLabel, buildViewModel, applyFilters, accessibleName, TERMINAL_EXECUTION_STATES } from "../dist/ui/model.js";
+import { parseEnvelope, humanAttention, outcomeLabel, buildViewModel, applyFilters, accessibleName, TERMINAL_EXECUTION_STATES } from "../dist-test/ui/model.js";
 
 const item = (id, patch = {}) => ({ ops_task_id: id, updated_at: null, ...patch });
 const envelope = (items = [], fetchedAt = 1000, patch = {}) => ({ fetchedAt, snapshot: { schema: "ops_work_snapshot_v1", items, ...patch } });
@@ -15,6 +15,7 @@ test("parseEnvelope validates schema and skips malformed task items", () => {
   assert.equal(result.envelope.snapshot.items.length, 1);
   assert.equal(parseEnvelope(envelope([], 1000), 61_000).kind, "ready");
   assert.equal(parseEnvelope(envelope([], 1000), 61_001).stale, true);
+  assert.equal(parseEnvelope(envelope([], NaN), 1000).fetchedAtIso, "unknown");
   assert.deepEqual(parseEnvelope(null, 0), { kind: "malformed", reason: "missing_envelope" });
   assert.deepEqual(parseEnvelope({ fetchedAt: 0 }, 0), { kind: "malformed", reason: "missing_snapshot" });
 });
@@ -22,6 +23,10 @@ test("parseEnvelope validates schema and skips malformed task items", () => {
 test("terminal states are exact and terminal blockers are not blocked attention", () => {
   assert.deepEqual([...TERMINAL_EXECUTION_STATES], ["succeeded", "failed", "stopped", "stopped_for_review", "merged", "cancelled", "done", "skipped"]);
   assert.deepEqual(humanAttention(item("a", { review_state: "needs review" })), { attention: true, reason: "review" });
+  assert.deepEqual(humanAttention(item("a", { review_state: "reviewed" })), { attention: false, reason: null });
+  assert.deepEqual(humanAttention(item("a", { review_state: "review_completed" })), { attention: false, reason: null });
+  assert.deepEqual(humanAttention(item("a", { review_state: "needs review", execution_state: "done" })), { attention: false, reason: null });
+  assert.equal(humanAttention(item("a", { review_state: "approved", blocker: "x" })).reason, "blocked");
   assert.equal(humanAttention(item("a", { review_state: "decision pending" })).reason, "decision");
   assert.equal(humanAttention(item("a", { review_state: "authorize" })).reason, "approval");
   assert.equal(humanAttention(item("a", { blocker: "waiting" })).reason, "blocked");
@@ -48,6 +53,8 @@ test("applyFilters supports query, scope, recency, project and combinations", ()
   assert.equal(applyFilters(rows, {query:"",scope:"attention",recency:"any",project:""},100_000).length,1);
   assert.equal(applyFilters(rows, {query:"",scope:"active",recency:"24h",project:"p"},100_000).length,1);
   assert.equal(applyFilters(rows, {query:"",scope:"all",recency:"7d",project:""},100_000).length,1);
+  const future = buildViewModel([item("future", { updated_at: new Date(220_000).toISOString() })], {now:100_000}).active;
+  assert.equal(applyFilters(future, {query:"",scope:"all",recency:"24h",project:""},100_000).length,1);
   assert.equal(applyFilters(rows, {query:"",scope:"all",recency:"any",project:"q"},100_000).length,1);
   assert.equal(applyFilters(rows, {query:"b",scope:"all",recency:"24h",project:""},100_000).length,0);
   assert.equal(applyFilters(rows, {query:"",scope:"terminal",recency:"any",project:""},100_000).length,0);
