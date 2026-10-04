@@ -18,7 +18,13 @@ export function parseEnvelope(raw:unknown, now:number):UiState {
  const snap=raw.snapshot;
  if (snap.schema !== "ops_work_snapshot_v1") return {kind:"malformed",reason:"unexpected_schema"};
  if (!Array.isArray(snap.items)) return {kind:"malformed",reason:"items_not_array"};
- const items=snap.items.filter((x):x is OpsWorkItem=>obj(x)&&typeof x.ops_task_id==="string"&&x.ops_task_id.trim().length>0);
+ const seen=new Set<string>();
+ const items=snap.items.filter((x):x is OpsWorkItem=>{
+  if(!obj(x)||typeof x.ops_task_id!=="string"||x.ops_task_id.trim().length===0)return false;
+  if(seen.has(x.ops_task_id))return false;
+  seen.add(x.ops_task_id);
+  return true;
+ });
  const hasFetchedAt=typeof raw.fetchedAt==="number"&&Number.isFinite(raw.fetchedAt); const fetchedAt=hasFetchedAt?raw.fetchedAt as number:0;
  const envelope={...raw,fetchedAt,snapshot:{...snap,items}} as unknown as SnapshotEnvelope;
  return {kind:"ready",envelope,stale:now-fetchedAt>STALE_AFTER_MS,fetchedAtIso:hasFetchedAt?new Date(fetchedAt).toISOString():"unknown",malformedItemCount:snap.items.length-items.length};
@@ -33,13 +39,45 @@ export function humanAttention(item:OpsWorkItem):{attention:boolean;reason:Atten
  else if(reason===null&&typeof item.qualification_state==="string"&&(/^(AWAITING|PENDING)/i).test(item.qualification_state)) reason="qualification";
  return {attention:reason!==null,reason};
 }
+export function attentionReasons(item:OpsWorkItem):AttentionReason[] {
+ if(isTerminal(item))return [];
+ const reasons:AttentionReason[]=[];
+ const primary=humanAttention(item).reason;
+ if(primary==="review"||primary==="decision"||primary==="approval")reasons.push(primary);
+ if(item.blocker)reasons.push("blocked");
+ if(typeof item.qualification_state==="string"&&/^(AWAITING|PENDING)/i.test(item.qualification_state))reasons.push("qualification");
+ return reasons;
+}
 export type OutcomeKind="success"|"failed"|"other";
 export function outcomeLabel(item:OpsWorkItem):string { return item.execution_state??item.qualification_state??item.issue_state??"terminal"; }
 export function outcomeKind(item:OpsWorkItem):OutcomeKind { if(["succeeded","merged","done"].includes(item.execution_state??"")||item.qualification_state==="MERGED")return "success"; if(item.execution_state==="failed")return "failed"; return "other"; }
-export interface Row {item:OpsWorkItem;attentionReason:AttentionReason;terminal:boolean;outcomeKind?:OutcomeKind;outcomeLabel?:string}
+export interface Row {item:OpsWorkItem;attentionReason:AttentionReason;attentionReasons:AttentionReason[];terminal:boolean;outcomeKind?:OutcomeKind;outcomeLabel?:string}
 export const OUTCOMES_CAP=25;
 function compareRows(a:Row,b:Row):number { const av=Date.parse(a.item.updated_at??""); const bv=Date.parse(b.item.updated_at??""); const aok=Number.isFinite(av),bok=Number.isFinite(bv); if(aok&&bok&&av!==bv)return bv-av; if(aok!==bok)return aok?-1:1; return (a.item.ops_task_id??"").localeCompare(b.item.ops_task_id??""); }
-export function buildViewModel(items:OpsWorkItem[],{now:_now}:{now:number}):{active:Row[];attention:Row[];outcomes:Row[]} { void _now; const all=items.map(item=>{const h=humanAttention(item),terminal=isTerminal(item);return {item,attentionReason:h.reason,terminal,...(terminal?{outcomeKind:outcomeKind(item),outcomeLabel:outcomeLabel(item)}:{})};}); return {active:all.filter(r=>!r.terminal).sort(compareRows),attention:all.filter(r=>r.attentionReason!==null).sort(compareRows),outcomes:all.filter(r=>r.terminal).sort(compareRows).slice(0,OUTCOMES_CAP)}; }
+export function buildViewModel(items:OpsWorkItem[],{now:_now}:{now:number}):{active:Row[];attention:Row[];outcomes:Row[]} { void _now; const all=items.map(item=>{const reasons=attentionReasons(item),terminal=isTerminal(item);return {item,attentionReason:reasons[0]??null,attentionReasons:reasons,terminal,...(terminal?{outcomeKind:outcomeKind(item),outcomeLabel:outcomeLabel(item)}:{})};}); return {active:all.filter(r=>!r.terminal).sort(compareRows),attention:all.filter(r=>r.attentionReasons.length>0).sort(compareRows),outcomes:all.filter(r=>r.terminal).sort(compareRows).slice(0,OUTCOMES_CAP)}; }
 export interface Filters {query:string;scope:"all"|"active"|"attention"|"terminal";recency:"any"|"24h"|"7d";project:string}
-export function applyFilters(rows:Row[],filters:Filters,now:number):Row[] { const q=filters.query.toLowerCase(); const cutoff=filters.recency==="24h"?now-86400000:filters.recency==="7d"?now-604800000:null; return rows.filter(r=>{const i=r.item;if(q&&!([i.issue_number,i.issue_title,i.ops_task_id,i.repository,i.project].some(v=>String(v??"").toLowerCase().includes(q))))return false;if(filters.scope==="active"&&r.terminal||filters.scope==="attention"&&r.attentionReason===null||filters.scope==="terminal"&&!r.terminal)return false;if(cutoff!==null){const t=Date.parse(i.updated_at??"");if(!Number.isFinite(t)||t<cutoff||t>now+300_000)return false;}if(filters.project&&i.project!==filters.project)return false;return true;}); }
+export function applyFilters(rows:Row[],filters:Filters,now:number):Row[] { const q=filters.query.toLowerCase(); const cutoff=filters.recency==="24h"?now-86400000:filters.recency==="7d"?now-604800000:null; return rows.filter(r=>{const i=r.item;if(q&&!([i.issue_number,i.issue_title,i.ops_task_id,i.repository,i.project].some(v=>String(v??"").toLowerCase().includes(q))))return false;if(filters.scope==="active"&&r.terminal||filters.scope==="attention"&&!(r.attentionReasons?.length ?? (r.attentionReason!==null?1:0))||filters.scope==="terminal"&&!r.terminal)return false;if(cutoff!==null){const t=Date.parse(i.updated_at??"");if(!Number.isFinite(t)||t<cutoff||t>now+300_000)return false;}if(filters.project&&i.project!==filters.project)return false;return true;}); }
 export function accessibleName(row:Row):string {const i=row.item;const issue=i.issue_number!==null&&i.issue_number!==undefined?`#${String(i.issue_number)}${i.issue_title?` ${i.issue_title}`:""}`:(i.issue_title||"unknown issue");return `${issue} · ${i.project||"unknown"}`;}
+
+export function summarize(text:unknown,max:number):string {
+ const value=String(text).replace(/\s+/g," ").trim();
+ const limit=Math.max(0,Math.trunc(max));
+ return value.length<=limit?value:limit===0?"":`${value.slice(0,limit-1).trimEnd()}…`;
+}
+export function formatRecency(updated_at:string|null|undefined,now:number):string {
+ if(typeof updated_at!=="string"||!/^\d{4}-\d{2}-\d{2}(T| |$)/.test(updated_at))return "unknown";
+ const timestamp=Date.parse(updated_at);
+ if(!Number.isFinite(timestamp)||!Number.isFinite(now)||timestamp>now+300_000)return "unknown";
+ const seconds=Math.max(0,Math.floor((now-timestamp)/1000));
+ if(seconds<60)return "just now";
+ if(seconds<3600)return `${Math.floor(seconds/60)}m ago`;
+ if(seconds<86400)return `${Math.floor(seconds/3600)}h ago`;
+ if(seconds<30*86400)return `${Math.floor(seconds/86400)}d ago`;
+ return new Date(timestamp).toISOString().slice(0,10);
+}
+export function blockSummary(item:OpsWorkItem):string {
+ return item.blocker===null||item.blocker===undefined||String(item.blocker).trim()===""?"—":summarize(item.blocker,80);
+}
+export function resolveSelection(rows:{active:Row[];attention:Row[];outcomes:Row[]},selectedId:string|null):string|null {
+ return selectedId!==null&&[...rows.active,...rows.attention,...rows.outcomes].some(row=>row.item.ops_task_id===selectedId)?selectedId:null;
+}

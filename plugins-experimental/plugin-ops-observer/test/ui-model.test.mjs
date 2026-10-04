@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseEnvelope, humanAttention, outcomeLabel, buildViewModel, applyFilters, accessibleName, TERMINAL_EXECUTION_STATES } from "../dist-test/ui/model.js";
+import * as model from "../dist-test/ui/model.js";
+const { parseEnvelope, humanAttention, outcomeLabel, buildViewModel, applyFilters, accessibleName, TERMINAL_EXECUTION_STATES } = model;
 
 const item = (id, patch = {}) => ({ ops_task_id: id, updated_at: null, ...patch });
 const envelope = (items = [], fetchedAt = 1000, patch = {}) => ({ fetchedAt, snapshot: { schema: "ops_work_snapshot_v1", items, ...patch } });
@@ -63,4 +64,95 @@ test("applyFilters supports query, scope, recency, project and combinations", ()
 test("accessibleName tolerates null fields", () => {
   assert.equal(accessibleName({item:item("a", {issue_number:214, issue_title:"Fix", project:"ops"}), attentionReason:null, terminal:false}), "#214 Fix · ops");
   assert.equal(accessibleName({item:item("a"), attentionReason:null, terminal:false}), "unknown issue · unknown");
+});
+
+test("summarize collapses whitespace and caps with an ellipsis", () => {
+  assert.equal(model.summarize("  alpha \n  beta  ", 20), "alpha beta");
+  assert.equal(model.summarize("  alpha \n  beta gamma  ", 10), "alpha bet…");
+  assert.equal(model.summarize(123, 10), "123");
+});
+
+test("formatRecency is deterministic across minute, hour, day and UTC date buckets", () => {
+  const now = Date.parse("2026-10-03T12:00:00Z");
+  const ago = seconds => new Date(now - seconds * 1000).toISOString();
+  assert.equal(model.formatRecency(ago(59), now), "just now");
+  assert.equal(model.formatRecency(ago(60), now), "1m ago");
+  assert.equal(model.formatRecency(ago(3600), now), "1h ago");
+  assert.equal(model.formatRecency(ago(86400), now), "1d ago");
+  assert.equal(model.formatRecency(ago(31 * 86400), now), "2026-09-02");
+  assert.equal(model.formatRecency(null, now), "unknown");
+  assert.equal(model.formatRecency("not-a-date", now), "unknown");
+});
+
+test("blockSummary gives a concise blocker or an em dash when absent", () => {
+  assert.equal(model.blockSummary(item("empty")), "—");
+  assert.equal(model.blockSummary(item("blocked", {blocker:"  wait \n for review  "})), "wait for review");
+  assert.equal(model.blockSummary(item("long", {blocker:"x".repeat(400)})).length, 80);
+});
+
+test("duplicate ops_task_id keeps first evidence and counts ambiguous records as malformed", () => {
+  const first = item("same", {issue_title:"first evidence"});
+  const result = parseEnvelope(envelope([first, item("same", {issue_title:"wrong evidence"}), item("other")]), 1000);
+  assert.equal(result.kind, "ready");
+  assert.deepEqual(result.envelope.snapshot.items, [first, item("other")]);
+  assert.equal(result.malformedItemCount, 1);
+});
+
+test("attentionReasons reports every independent nonterminal reason in precedence order", () => {
+  assert.deepEqual(model.attentionReasons(item("all", {review_state:"needs review",blocker:"waiting",qualification_state:"AWAITING_GO"})), ["review","blocked","qualification"]);
+  assert.deepEqual(model.attentionReasons(item("single", {blocker:"waiting"})), ["blocked"]);
+  assert.deepEqual(model.attentionReasons(item("none")), []);
+  assert.deepEqual(model.attentionReasons(item("done", {review_state:"needs review",blocker:"waiting",qualification_state:"PENDING_GO",execution_state:"done"})), []);
+  const [row] = buildViewModel([item("all", {review_state:"needs review",blocker:"waiting",qualification_state:"AWAITING_GO"})], {now:0}).attention;
+  assert.deepEqual(row.attentionReasons, ["review","blocked","qualification"]);
+  assert.equal(row.attentionReason, "review");
+});
+
+test("terminal qualification never enters human attention and retains outcome only", () => {
+  const rows = buildViewModel([item("terminal-qualification", {
+    execution_state:"done", qualification_state:"PENDING_GO", blocker:"x"
+  })], {now:0});
+  assert.deepEqual(rows.active, []);
+  assert.deepEqual(rows.attention, []);
+  assert.equal(rows.outcomes.length, 1);
+  assert.equal(rows.outcomes[0].item.ops_task_id, "terminal-qualification");
+  assert.deepEqual(rows.outcomes[0].attentionReasons, []);
+  assert.equal(rows.outcomes[0].attentionReason, null);
+  const attention = {query:"",scope:"attention",recency:"any",project:""};
+  assert.deepEqual(applyFilters(rows.outcomes, attention, 0), []);
+  assert.equal(applyFilters([{item:item("legacy",{blocker:"x"}),terminal:false,attentionReason:"blocked"}], attention, 0).length, 1);
+});
+
+test("recent outcomes order by descending timestamp and id tie-break", () => {
+  const rows = buildViewModel([
+    item("z", {execution_state:"done",updated_at:"2026-10-02T12:00:00Z"}),
+    item("b", {execution_state:"failed",updated_at:"2026-10-03T12:00:00Z"}),
+    item("a", {execution_state:"merged",updated_at:"2026-10-03T12:00:00Z"})
+  ], {now:Date.parse("2026-10-03T12:00:00Z")});
+  assert.deepEqual(rows.outcomes.map(row=>row.item.ops_task_id), ["a","b","z"]);
+});
+
+test("filtering away the selected item clears its orphaned selection", () => {
+  const vm = buildViewModel([item("keep", {project:"a"}),item("hide", {project:"b"})], {now:0});
+  const filters = {query:"",scope:"all",recency:"any",project:"a"};
+  const filtered = Object.fromEntries(Object.entries(vm).map(([section,rows])=>[section,applyFilters(rows,filters,0)]));
+  assert.equal(model.resolveSelection(vm,"hide"),"hide");
+  assert.equal(model.resolveSelection(filtered,"hide"),null);
+});
+
+test("formatRecency rejects far-future and non-ISO timestamps while tolerating small clock skew", () => {
+  const now = Date.parse("2026-10-03T12:00:00Z");
+  assert.equal(model.formatRecency(new Date(now+6*60_000).toISOString(),now),"unknown");
+  assert.equal(model.formatRecency(new Date(now+2*60_000).toISOString(),now),"just now");
+  assert.equal(model.formatRecency("10/02/2026 12:00:00",now),"unknown");
+});
+
+test("resolveSelection retains ids in any visible section and clears orphaned or null ids", () => {
+  const row = id => ({item:item(id),terminal:false,attentionReason:null});
+  for (const key of ["active", "attention", "outcomes"]) {
+    const rows = {active:[],attention:[],outcomes:[],[key]:[row("present")]};
+    assert.equal(model.resolveSelection(rows, "present"), "present", key);
+    assert.equal(model.resolveSelection(rows, "hidden"), null, key);
+    assert.equal(model.resolveSelection(rows, null), null, key);
+  }
 });
