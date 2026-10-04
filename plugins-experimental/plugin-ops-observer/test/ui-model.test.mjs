@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseEnvelope, humanAttention, outcomeLabel, buildViewModel, applyFilters, accessibleName, TERMINAL_EXECUTION_STATES } from "../dist-test/ui/model.js";
+import * as model from "../dist-test/ui/model.js";
+const { parseEnvelope, humanAttention, outcomeLabel, buildViewModel, applyFilters, accessibleName, TERMINAL_EXECUTION_STATES } = model;
 
 const item = (id, patch = {}) => ({ ops_task_id: id, updated_at: null, ...patch });
 const envelope = (items = [], fetchedAt = 1000, patch = {}) => ({ fetchedAt, snapshot: { schema: "ops_work_snapshot_v1", items, ...patch } });
@@ -63,4 +64,38 @@ test("applyFilters supports query, scope, recency, project and combinations", ()
 test("accessibleName tolerates null fields", () => {
   assert.equal(accessibleName({item:item("a", {issue_number:214, issue_title:"Fix", project:"ops"}), attentionReason:null, terminal:false}), "#214 Fix · ops");
   assert.equal(accessibleName({item:item("a"), attentionReason:null, terminal:false}), "unknown issue · unknown");
+});
+
+test("summarize collapses whitespace and caps with an ellipsis", () => {
+  assert.equal(model.summarize("  alpha \n  beta  ", 20), "alpha beta");
+  assert.equal(model.summarize("  alpha \n  beta gamma  ", 10), "alpha be…");
+  assert.equal(model.summarize(123, 10), "123");
+});
+
+test("formatRecency is deterministic across minute, hour, day and UTC date buckets", () => {
+  const now = Date.parse("2026-10-03T12:00:00Z");
+  const ago = seconds => new Date(now - seconds * 1000).toISOString();
+  assert.equal(model.formatRecency(ago(59), now), "just now");
+  assert.equal(model.formatRecency(ago(60), now), "1m ago");
+  assert.equal(model.formatRecency(ago(3600), now), "1h ago");
+  assert.equal(model.formatRecency(ago(86400), now), "1d ago");
+  assert.equal(model.formatRecency(ago(31 * 86400), now), "2026-09-02");
+  assert.equal(model.formatRecency(null, now), "unknown");
+  assert.equal(model.formatRecency("not-a-date", now), "unknown");
+});
+
+test("blockSummary gives a concise blocker or an em dash when absent", () => {
+  assert.equal(model.blockSummary(item("empty")), "—");
+  assert.equal(model.blockSummary(item("blocked", {blocker:"  wait \n for review  "})), "wait for review");
+  assert.equal(model.blockSummary(item("long", {blocker:"x".repeat(400)})).length, 80);
+});
+
+test("resolveSelection retains ids in any visible section and clears orphaned or null ids", () => {
+  const row = id => ({item:item(id),terminal:false,attentionReason:null});
+  for (const key of ["active", "attention", "outcomes"]) {
+    const rows = {active:[],attention:[],outcomes:[],[key]:[row("present")]};
+    assert.equal(model.resolveSelection(rows, "present"), "present", key);
+    assert.equal(model.resolveSelection(rows, "hidden"), null, key);
+    assert.equal(model.resolveSelection(rows, null), null, key);
+  }
 });
