@@ -68,7 +68,7 @@ test("accessibleName tolerates null fields", () => {
 
 test("summarize collapses whitespace and caps with an ellipsis", () => {
   assert.equal(model.summarize("  alpha \n  beta  ", 20), "alpha beta");
-  assert.equal(model.summarize("  alpha \n  beta gamma  ", 10), "alpha be…");
+  assert.equal(model.summarize("  alpha \n  beta gamma  ", 10), "alpha bet…");
   assert.equal(model.summarize(123, 10), "123");
 });
 

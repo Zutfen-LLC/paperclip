@@ -43,3 +43,25 @@ export function buildViewModel(items:OpsWorkItem[],{now:_now}:{now:number}):{act
 export interface Filters {query:string;scope:"all"|"active"|"attention"|"terminal";recency:"any"|"24h"|"7d";project:string}
 export function applyFilters(rows:Row[],filters:Filters,now:number):Row[] { const q=filters.query.toLowerCase(); const cutoff=filters.recency==="24h"?now-86400000:filters.recency==="7d"?now-604800000:null; return rows.filter(r=>{const i=r.item;if(q&&!([i.issue_number,i.issue_title,i.ops_task_id,i.repository,i.project].some(v=>String(v??"").toLowerCase().includes(q))))return false;if(filters.scope==="active"&&r.terminal||filters.scope==="attention"&&r.attentionReason===null||filters.scope==="terminal"&&!r.terminal)return false;if(cutoff!==null){const t=Date.parse(i.updated_at??"");if(!Number.isFinite(t)||t<cutoff||t>now+300_000)return false;}if(filters.project&&i.project!==filters.project)return false;return true;}); }
 export function accessibleName(row:Row):string {const i=row.item;const issue=i.issue_number!==null&&i.issue_number!==undefined?`#${String(i.issue_number)}${i.issue_title?` ${i.issue_title}`:""}`:(i.issue_title||"unknown issue");return `${issue} · ${i.project||"unknown"}`;}
+
+export function summarize(text:unknown,max:number):string {
+ const value=String(text).replace(/\s+/g," ").trim();
+ const limit=Math.max(0,Math.trunc(max));
+ return value.length<=limit?value:limit===0?"":`${value.slice(0,limit-1).trimEnd()}…`;
+}
+export function formatRecency(updated_at:string|null|undefined,now:number):string {
+ const timestamp=Date.parse(updated_at??"");
+ if(!Number.isFinite(timestamp)||!Number.isFinite(now))return "unknown";
+ const seconds=Math.max(0,Math.floor((now-timestamp)/1000));
+ if(seconds<60)return "just now";
+ if(seconds<3600)return `${Math.floor(seconds/60)}m ago`;
+ if(seconds<86400)return `${Math.floor(seconds/3600)}h ago`;
+ if(seconds<30*86400)return `${Math.floor(seconds/86400)}d ago`;
+ return new Date(timestamp).toISOString().slice(0,10);
+}
+export function blockSummary(item:OpsWorkItem):string {
+ return item.blocker===null||item.blocker===undefined||String(item.blocker).trim()===""?"—":summarize(item.blocker,80);
+}
+export function resolveSelection(rows:{active:Row[];attention:Row[];outcomes:Row[]},selectedId:string|null):string|null {
+ return selectedId!==null&&[...rows.active,...rows.attention,...rows.outcomes].some(row=>row.item.ops_task_id===selectedId)?selectedId:null;
+}
