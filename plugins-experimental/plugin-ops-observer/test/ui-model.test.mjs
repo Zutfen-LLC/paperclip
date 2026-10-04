@@ -108,6 +108,21 @@ test("attentionReasons reports every independent nonterminal reason in precedenc
   assert.equal(row.attentionReason, "review");
 });
 
+test("terminal qualification never enters human attention and retains outcome only", () => {
+  const rows = buildViewModel([item("terminal-qualification", {
+    execution_state:"done", qualification_state:"PENDING_GO", blocker:"x"
+  })], {now:0});
+  assert.deepEqual(rows.active, []);
+  assert.deepEqual(rows.attention, []);
+  assert.equal(rows.outcomes.length, 1);
+  assert.equal(rows.outcomes[0].item.ops_task_id, "terminal-qualification");
+  assert.deepEqual(rows.outcomes[0].attentionReasons, []);
+  assert.equal(rows.outcomes[0].attentionReason, null);
+  const attention = {query:"",scope:"attention",recency:"any",project:""};
+  assert.deepEqual(applyFilters(rows.outcomes, attention, 0), []);
+  assert.equal(applyFilters([{item:item("legacy",{blocker:"x"}),terminal:false,attentionReason:"blocked"}], attention, 0).length, 1);
+});
+
 test("recent outcomes order by descending timestamp and id tie-break", () => {
   const rows = buildViewModel([
     item("z", {execution_state:"done",updated_at:"2026-10-02T12:00:00Z"}),

@@ -16,6 +16,17 @@ test("refresh failure keeps cached data visible with a fixed notice",()=>{const 
 test("malformed item count is shown",()=>{const e=envelope([]);const html=view({kind:"ready",envelope:e,stale:false,fetchedAtIso:"OK",malformedItemCount:2});assert.match(html,/2 malformed items skipped/);});
 test("project options use the full item list",()=>{const e=envelope([item("project-item",{project:"pA"})]);const html=renderToStaticMarkup(React.createElement(OpsWorkView,{state:{kind:"ready",envelope:e,stale:false,fetchedAtIso:"OK",malformedItemCount:0},rows:{active:[],attention:[],outcomes:[]},filters,onFilters:()=>{},selectedId:null,onSelect:()=>{},onRefresh:()=>{},loading:false,now:0,items:e.snapshot.items,refreshFailed:false}));assert.match(html,/<option>pA<\/option>/);});
 test("empty attention has a named empty state",()=>{const e=envelope([]);const html=view({kind:"ready",envelope:e,stale:false,fetchedAtIso:new Date(e.fetchedAt).toISOString(),malformedItemCount:0});assert.match(html,/No work waiting on human attention/);});
+test("terminal qualification renders an empty human-attention section without a blank waiting cell",()=>{
+ const terminal=item("terminal-qualification",{execution_state:"done",qualification_state:"PENDING_GO",blocker:"x"});
+ const e=envelope([terminal]);
+ const rows=buildViewModel(e.snapshot.items,{now:e.fetchedAt});
+ const html=view({kind:"ready",envelope:e,stale:false,fetchedAtIso:new Date(e.fetchedAt).toISOString(),malformedItemCount:0},rows);
+ const attention=html.match(/<section aria-labelledby="human-attention"[\s\S]*?<\/section>/)?.[0];
+ assert.ok(attention);
+ assert.match(attention,/No work waiting on human attention/);
+ assert.doesNotMatch(attention,/<td><\/td>/);
+ assert.match(html,/Recent outcomes \(1\)/);
+});
 test("empty source links render unknown",()=>{const source=item("source-empty",{source_links:[],updated_at:null});const e=envelope([source]);const html=view({kind:"ready",envelope:e,stale:false,fetchedAtIso:new Date(e.fetchedAt).toISOString(),malformedItemCount:0},{active:[],attention:[{item:source,terminal:false,attentionReason:"review"}],outcomes:[]},"source-empty");assert.match(html,/<td>unknown<\/td>/);assert.match(html,/<dt>source_links<\/dt><dd>unknown<\/dd>/);});
 test("stale data announces status and field text remains visible",()=>{const poison=item("p",{issue_title:"leak-POISONSEXTOKEN123"});const e=envelope([poison]);const html=view({kind:"ready",envelope:e,stale:true,fetchedAtIso:new Date(e.fetchedAt).toISOString(),malformedItemCount:0},{active:[{item:poison,terminal:false,attentionReason:null}],attention:[],outcomes:[]});assert.match(html,/role="status"/);assert.match(html,/leak-POISONSEXTOKEN123/);assert.doesNotMatch(html,/Authorization/);assertTableCellAlignment(html);});
 
