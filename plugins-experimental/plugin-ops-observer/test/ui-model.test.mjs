@@ -90,6 +90,48 @@ test("blockSummary gives a concise blocker or an em dash when absent", () => {
   assert.equal(model.blockSummary(item("long", {blocker:"x".repeat(400)})).length, 80);
 });
 
+test("duplicate ops_task_id keeps first evidence and counts ambiguous records as malformed", () => {
+  const first = item("same", {issue_title:"first evidence"});
+  const result = parseEnvelope(envelope([first, item("same", {issue_title:"wrong evidence"}), item("other")]), 1000);
+  assert.equal(result.kind, "ready");
+  assert.deepEqual(result.envelope.snapshot.items, [first, item("other")]);
+  assert.equal(result.malformedItemCount, 1);
+});
+
+test("attentionReasons reports every independent nonterminal reason in precedence order", () => {
+  assert.deepEqual(model.attentionReasons(item("all", {review_state:"needs review",blocker:"waiting",qualification_state:"AWAITING_GO"})), ["review","blocked","qualification"]);
+  assert.deepEqual(model.attentionReasons(item("single", {blocker:"waiting"})), ["blocked"]);
+  assert.deepEqual(model.attentionReasons(item("none")), []);
+  assert.deepEqual(model.attentionReasons(item("done", {review_state:"needs review",blocker:"waiting",qualification_state:"PENDING_GO",execution_state:"done"})), []);
+  const [row] = buildViewModel([item("all", {review_state:"needs review",blocker:"waiting",qualification_state:"AWAITING_GO"})], {now:0}).attention;
+  assert.deepEqual(row.attentionReasons, ["review","blocked","qualification"]);
+  assert.equal(row.attentionReason, "review");
+});
+
+test("recent outcomes order by descending timestamp and id tie-break", () => {
+  const rows = buildViewModel([
+    item("z", {execution_state:"done",updated_at:"2026-10-02T12:00:00Z"}),
+    item("b", {execution_state:"failed",updated_at:"2026-10-03T12:00:00Z"}),
+    item("a", {execution_state:"merged",updated_at:"2026-10-03T12:00:00Z"})
+  ], {now:Date.parse("2026-10-03T12:00:00Z")});
+  assert.deepEqual(rows.outcomes.map(row=>row.item.ops_task_id), ["a","b","z"]);
+});
+
+test("filtering away the selected item clears its orphaned selection", () => {
+  const vm = buildViewModel([item("keep", {project:"a"}),item("hide", {project:"b"})], {now:0});
+  const filters = {query:"",scope:"all",recency:"any",project:"a"};
+  const filtered = Object.fromEntries(Object.entries(vm).map(([section,rows])=>[section,applyFilters(rows,filters,0)]));
+  assert.equal(model.resolveSelection(vm,"hide"),"hide");
+  assert.equal(model.resolveSelection(filtered,"hide"),null);
+});
+
+test("formatRecency rejects far-future and non-ISO timestamps while tolerating small clock skew", () => {
+  const now = Date.parse("2026-10-03T12:00:00Z");
+  assert.equal(model.formatRecency(new Date(now+6*60_000).toISOString(),now),"unknown");
+  assert.equal(model.formatRecency(new Date(now+2*60_000).toISOString(),now),"just now");
+  assert.equal(model.formatRecency("10/02/2026 12:00:00",now),"unknown");
+});
+
 test("resolveSelection retains ids in any visible section and clears orphaned or null ids", () => {
   const row = id => ({item:item(id),terminal:false,attentionReason:null});
   for (const key of ["active", "attention", "outcomes"]) {

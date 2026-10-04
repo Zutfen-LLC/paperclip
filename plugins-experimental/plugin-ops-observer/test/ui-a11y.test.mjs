@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import React from "react";
 import {renderToStaticMarkup} from "react-dom/server";
+import {buildViewModel} from "../dist-test/ui/model.js";
 import {OpsWorkView} from "../dist-test/ui/test-export.js";
 const filters={query:"",scope:"all",recency:"any",project:""};
 const item=(id,extra={})=>({ops_task_id:id,project:"ops",repository:"org/repo",issue_number:214,issue_title:"issue",issue_state:null,execution_state:null,review_state:null,qualification_state:null,updated_at:"2026-10-03T12:00:00.000Z",source_links:["https://example.test/item"],...extra});
@@ -50,6 +51,16 @@ test("verbose evidence remains available in the selected detail region",()=>{
  assert.ok(aside);
  for(const token of ["B".repeat(400),"run-unique-123","run-parent-456","head-sha-789","tokens","42","revision","source-v9","https://example.test/triage"])assert.ok(aside.includes(token),token);
  assert.doesNotMatch(html.slice(0,html.indexOf("<aside")),/run-unique-123|run-parent-456/);
+});
+
+test("human attention cell shows all applicable reasons concisely",()=>{
+ const multi=item("multi",{review_state:"needs review",blocker:"waiting",qualification_state:"AWAITING_GO"});
+ const e=envelope([multi]);
+ const rows=buildViewModel(e.snapshot.items,{now:e.fetchedAt});
+ const html=view({kind:"ready",envelope:e,stale:false,fetchedAtIso:new Date(e.fetchedAt).toISOString(),malformedItemCount:0},rows);
+ const attention=html.match(/<section aria-labelledby="human-attention"[\s\S]*?<\/section>/)?.[0];
+ assert.ok(attention);
+ assert.match(attention,/<td>review, blocked, qualification<\/td>/);
 });
 
 test("ready view exposes only read-only Refresh Details and Close buttons",()=>{
