@@ -103,21 +103,23 @@ mountedTest("re-clicking the selected row focuses and re-scrolls the details reg
   });
 });
 
-mountedTest("native focusable View details button activates by keyboard",async()=>{
+mountedTest("View details exposes the native keyboard-activation button contract",async()=>{
   await withMounted(async({document,button,click,selected})=>{
     const opener=button("first");
     assert.equal(opener.tagName,"BUTTON");
-    assert.equal(opener.type,"button");
+    assert.equal(opener.getAttribute("type"),"button");
+    assert.equal(opener.disabled,false);
+    assert.match(opener.getAttribute("aria-label")??"",/^View details for First issue · ops$/);
     opener.focus();
-    assert.ok(document.activeElement===opener,"focus must return to the invoking button");
-    // jsdom's button.click() is the native activation path used by Enter.
+    assert.ok(document.activeElement===opener,"button must be focusable");
+    // jsdom cannot synthesize keydown→click; Enter/Space activation is browser-native for buttons.
     await click(opener);
     assert.equal(selected(),"first");
     assert.match(document.querySelector("aside").textContent,/First issue/);
   });
 });
 
-mountedTest("filtering an open item clears selection and unmounts its detail region",async()=>{
+mountedTest("detail region unmounts when the selected item is no longer in rows",async()=>{
   await withMounted(async({document,button,click,rerender})=>{
     await click(button("second"));
     assert.ok(document.querySelector("aside"));
